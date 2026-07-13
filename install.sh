@@ -7,6 +7,20 @@
 # to edit) — follow the printed "NEXT STEPS" to finish wiring it up.
 set -euo pipefail
 
+# Opt-in features. Accept them as flags AND honour the env form (WITH_BRIDGE /
+# WITH_ZED) — a flag just exports the env so it survives the curl-bootstrap re-exec
+# below (which forwards env, not argv). Everything here is OFF by default, so a plain
+# install / the bare curl one-liner stays cmux-only and Zed-free — other users of the
+# repo are unaffected unless they ask for it.
+for arg in "$@"; do
+  case "$arg" in
+    --with-zed)    export WITH_ZED=1 ;;
+    --with-bridge) export WITH_BRIDGE=1 ;;
+    -h|--help)     echo "usage: install.sh [--with-bridge] [--with-zed]"; exit 0 ;;
+    *) echo "install.sh: unknown option: $arg (try --help)" >&2; exit 2 ;;
+  esac
+done
+
 REPO_URL="https://github.com/oliver-kriska/cmux-sentinel.git"
 
 # Resolve our own directory. When piped (curl … | bash) there is no file beside
@@ -45,11 +59,14 @@ bak() { [ -e "$1" ] && cp "$1" "$1.bak.$(date +%s)" && echo "  backed up $1"; re
 # absent. Needs jq; if jq is missing or the file isn't valid JSON we DON'T touch it
 # (don't clobber a hand-edited settings) — we point at the README block. New event
 # registrations only take effect after Claude Code restarts.
+# register_hooks <cmd> <marker> <event…> — for each named Claude Code hook event add
+# a {matcher:"", hooks:[{command:$cmd, async:true}]} entry UNLESS that event already
+# references $marker (idempotent). $cmd carries a literal ~ (Claude expands it at
+# hook-exec time); $marker is the substring that means "already wired" (e.g. the
+# script basename). Both bridges route through here so the jq stays in one place.
 register_hooks() {
-  # The literal ~ is intentional: Claude Code stores and expands it at hook-exec time
-  # (matches the form in a working settings.json), so don't substitute $HOME here.
-  # shellcheck disable=SC2088
-  local settings="$HOME/.claude/settings.json" cmd='~/.claude/hooks/cmux-bridge.sh' tmp
+  local cmd="$1" marker="$2"; shift 2
+  local settings="$HOME/.claude/settings.json" tmp events_json
   if ! command -v jq >/dev/null 2>&1; then
     echo "  ⚠ jq not found — paste the hooks block from the README into $settings"; return 0
   fi
@@ -57,18 +74,19 @@ register_hooks() {
   if ! jq -e . "$settings" >/dev/null 2>&1; then
     echo "  ⚠ $settings isn't valid JSON — paste the hooks block from the README by hand"; return 0
   fi
+  events_json="$(printf '%s\n' "$@" | jq -R . | jq -s .)"  # events → JSON array
   bak "$settings"
   tmp="$(mktemp)"
-  if jq --arg cmd "$cmd" '
+  if jq --arg cmd "$cmd" --arg marker "$marker" --argjson events "$events_json" '
       def ensure($ev):
         (.hooks[$ev] // []) as $cur
-        | if ($cur | tostring | contains("cmux-bridge")) then .
+        | if ($cur | tostring | contains($marker)) then .
           else .hooks[$ev] = ($cur + [{matcher: "", hooks: [{type: "command", command: $cmd, async: true}]}]) end;
       .hooks = (.hooks // {})
-      | reduce (["SessionStart","UserPromptSubmit","PreToolUse","PreCompact","PostCompact","Stop","StopFailure","Notification","PostToolUseFailure","SessionEnd"][]) as $ev (.; ensure($ev))
+      | reduce ($events[]) as $ev (.; ensure($ev))
     ' "$settings" >"$tmp" && [ -s "$tmp" ]; then
     mv "$tmp" "$settings"
-    echo "  -> wired cmux-bridge into $settings (RESTART Claude Code to load new hook events)"
+    echo "  -> wired $marker into $settings (RESTART Claude Code to load new hook events)"
   else
     rm -f "$tmp"
     echo "  ⚠ couldn't update $settings automatically — paste the hooks block from the README"
@@ -133,7 +151,33 @@ if [ "${WITH_BRIDGE:-0}" = "1" ] || [ -f "$HOME/.claude/hooks/cmux-bridge.sh" ];
   bak "$HOME/.claude/hooks/cmux-bridge.sh"
   install -m 0755 "$here/hooks/cmux-bridge.sh" "$HOME/.claude/hooks/cmux-bridge.sh"
   echo "  -> ~/.claude/hooks/cmux-bridge.sh"
-  register_hooks   # wire the events into settings.json (idempotent) — was the manual step everyone skipped
+  # wire the events into settings.json (idempotent) — was the manual step everyone skipped.
+  # The literal ~ is intentional (Claude expands it at hook-exec time), so quote it.
+  # shellcheck disable=SC2088
+  register_hooks '~/.claude/hooks/cmux-bridge.sh' 'cmux-bridge' \
+    SessionStart UserPromptSubmit PreToolUse PreCompact PostCompact \
+    Stop StopFailure Notification PostToolUseFailure SessionEnd
+fi
+
+# 5b. Zed integration (opt-in via --with-zed / WITH_ZED=1). Mirrors the bridge block:
+#     also refreshes an already-installed zed-bridge on a plain re-run. Installs the
+#     Zed status bridge + the cmux→Zed handoff and usage-TUI helpers, and wires the
+#     Zed bridge's 8 events into settings.json. Everything stays INERT until you
+#     `export ZED_SENTINEL=1` (the master gate) — see docs/zed-integration.md — so a
+#     default install never touches Zed and other users of the repo are unaffected.
+if [ "${WITH_ZED:-0}" = "1" ] || [ -f "$HOME/.claude/hooks/zed-bridge.sh" ]; then
+  bak "$HOME/.claude/hooks/zed-bridge.sh"
+  install -m 0755 "$here/hooks/zed-bridge.sh" "$HOME/.claude/hooks/zed-bridge.sh"
+  echo "  -> ~/.claude/hooks/zed-bridge.sh"
+  install -m 0755 "$here/bin/cmux-open-in-zed.sh" "$HOME/bin/cmux-open-in-zed.sh"
+  echo "  -> ~/bin/cmux-open-in-zed.sh  (ze: open the current worktree in Zed)"
+  install -m 0755 "$here/bin/zed-usage-tui.sh" "$HOME/bin/zed-usage-tui.sh"
+  echo "  -> ~/bin/zed-usage-tui.sh  (usage meters in a Zed terminal pane)"
+  # shellcheck disable=SC2088
+  register_hooks '~/.claude/hooks/zed-bridge.sh' 'zed-bridge' \
+    SessionStart UserPromptSubmit PreToolUse PreCompact PostCompact \
+    Notification Stop SessionEnd
+  ZED_INSTALLED=1
 fi
 
 cat <<'NEXT'
@@ -173,6 +217,10 @@ cat <<'NEXT'
  WITH_BRIDGE=1 ./install.sh  — it installs the bridge AND auto-wires the hooks into
  ~/.claude/settings.json. Then RESTART Claude Code so the new hook events register.)
 
+(Use Zed as your editor/git UI alongside cmux? Run  ./install.sh --with-zed  to add
+ the opt-in Zed integration — a cmux→Zed worktree handoff, agent-state markers, and a
+ usage-meter pane. It stays inert until you export ZED_SENTINEL=1. See docs/zed-integration.md.)
+
 (Workspace-GROUP names — if you use cmux workspace groups, the sidebar shows the
  anchor's generic "Group 2" instead of the group's name (cmux gives custom sidebars
  no group data). To fix: set GROUP_NAME_SYNC=1 in ~/.config/cmux/usage-sentinels.env,
@@ -182,3 +230,24 @@ cat <<'NEXT'
 To UPDATE later: re-run this installer (curl one-liner or `git pull && ./install.sh`), then
 `cmux sidebar reload`. An already-installed bridge refreshes automatically — no flag needed.
 NEXT
+
+# Extra steps only when the Zed integration was just installed. Kept OUT of the main
+# heredoc so a default install never mentions Zed. Unquoted heredoc so $HOME expands
+# to the real path; the command-sub and backticks are escaped to print literally.
+if [ "${ZED_INSTALLED:-0}" = "1" ]; then
+  cat <<ZED
+
+🧩 Zed integration installed (opt-in — inert until you arm it). To turn it ON for
+   yourself only (other repo users are unaffected), add to your ~/.zshrc:
+
+     export ZED_SENTINEL=1
+     eval "\$($HOME/bin/cmux-open-in-zed.sh --shell-init)"
+
+   Then: (a) RESTART Claude Code so the zed-bridge hook events load; (b) open a new
+   shell. Now \`ze\` (or Ctrl-O) opens Zed on the current git worktree, and agent
+   state (⚡ working / ⏳ compacting / ❓ waiting-on-you) rides the terminal title +
+   \$ZED_SENTINEL_STATE_DIR JSON. Without ZED_SENTINEL=1 the bridge is a no-op.
+   Optional: run ~/bin/zed-usage-tui.sh in a Zed terminal pane for the usage meters.
+   Full guide + all the toggles: docs/zed-integration.md
+ZED
+fi

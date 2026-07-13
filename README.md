@@ -113,6 +113,7 @@ Or clone it yourself:
 git clone https://github.com/oliver-kriska/cmux-sentinel.git
 cd cmux-sentinel
 ./install.sh                 # add WITH_BRIDGE=1 to also install + wire the working-state hooks
+                             # add --with-zed  (or WITH_ZED=1) for the opt-in Zed integration
 ```
 
 `install.sh` copies the files into place (backing up anything it overwrites) and prints the
@@ -168,6 +169,16 @@ Code:
 
 `Notification` drives `❓ waiting-on-you` (permission prompts); `UserPromptSubmit`/`PreToolUse`
 drive `⚡ working`; `PreCompact`/`PostCompact` drive `⏳ compacting`; `Stop`/`SessionEnd` clear it.
+
+### Using Zed alongside cmux (opt-in, off by default)
+
+If you keep cmux for terminals/agents but reach for [Zed](https://zed.dev) as your editor + git UI,
+`install.sh --with-zed` (or `WITH_ZED=1 ./install.sh`) adds three personal helpers: a **cmux→Zed
+worktree handoff** (`ze` / `Ctrl-O` opens Zed on the current git worktree — no window-switching and
+project/worktree re-picking), the same **agent-state markers** (`⚡`/`⏳`/`❓`) mirrored to Zed's
+terminal-tab title + a JSON status sink, and a **usage-meter pane** for Zed's terminal. It's wired
+into nothing until you `export ZED_SENTINEL=1`, so a default install stays Zed-free and other users
+of this repo are unaffected. Full setup and every toggle: [`docs/zed-integration.md`](docs/zed-integration.md).
 
 **Prereqs:** macOS, cmux (custom sidebars / beta), Claude Code logged in, `jq`, `curl`, `git`.
 

@@ -13,9 +13,33 @@ and you should keep it that way (don't make it the default for other users of th
 | `bin/cmux-open-in-zed.sh` (`ze`) | Runs only when you invoke it (alias/keybind) | Invoke-only; never fires on its own |
 | `bin/zed-usage-tui.sh` | Runs only when you launch it in a terminal pane | Invoke-only |
 
-`install.sh` wires `hooks/cmux-bridge.sh` (the cmux bridge) only — never the Zed bridge.
+A **default** `install.sh` (bare, or the curl one-liner) wires `hooks/cmux-bridge.sh` (the cmux
+bridge) only — it never installs or registers the Zed bridge. The Zed pieces are installed **only**
+when you opt in with `--with-zed` / `WITH_ZED=1` (below), and even then stay inert until `ZED_SENTINEL=1`.
 
-## Enable it for yourself
+## Easy path — `install.sh --with-zed`
+
+One command installs all three Zed helpers and wires `hooks/zed-bridge.sh` into your
+`~/.claude/settings.json` (its 8 events), then prints the exact `~/.zshrc` lines to finish:
+
+```sh
+./install.sh --with-zed          # or: WITH_ZED=1 ./install.sh
+```
+
+`WITH_ZED=1` (env form) is honored too, so it also works through the curl bootstrap
+(`curl … | WITH_ZED=1 bash`), which forwards env but not argv. This installs files and registers
+hooks; **nothing activates** until you set the master switch and restart Claude Code:
+
+```sh
+# add to ~/.zshrc, then RESTART Claude Code and open a new shell
+export ZED_SENTINEL=1
+eval "$(~/bin/cmux-open-in-zed.sh --shell-init)"
+```
+
+A re-run of a plain `install.sh` (no flag) still refreshes an already-installed Zed bridge — same
+"update on re-run" behavior as the cmux bridge — but never installs it fresh without the flag.
+
+## Manual path — enable it piece by piece
 
 1. **Master switch** — in your `~/.zshrc` (so Claude Code, launched from your shell, inherits it):
 
@@ -49,6 +73,8 @@ Nothing in the committed repo changes.
 
 ## Do NOT make it default for the repo
 
-Keep the Zed pieces out of `install.sh`'s default path and out of the shared sidebar. If a
-one-command personal enable is ever added, gate it behind an explicit flag (e.g. `install.sh --with-zed`
-or `ZED_SENTINEL=1`), never on by default. See `docs/zed-fork-research.md` for the full background.
+Keep the Zed pieces out of `install.sh`'s **default** path and out of the shared sidebar. The
+one-command enable exists (`install.sh --with-zed` / `WITH_ZED=1`) but is gated behind that explicit
+flag and stays inert until `ZED_SENTINEL=1` — a bare `install.sh` and the curl one-liner remain
+Zed-free, so other users of the repo are unaffected. Don't flip that default. See
+`docs/zed-fork-research.md` for the full background.

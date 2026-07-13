@@ -96,7 +96,8 @@ cmux sidebar validate workspaces && cmux sidebar reload   # validate only PARSES
 ./bin/cmux-group-sync.sh --update      # rename group anchors to the group name (needs GROUP_NAME_SYNC=1)
 
 # offline tests (stub cmux/security/curl/$HOME — run in CI too)
-make test   # bridge-state(36) poller-gate(21) codex-poller(25) install-hooks(8) sentinel-setup(14) group-sync(20)
+make test   # bridge-state(36) poller-gate(21) codex-poller(25) install-hooks(21) sentinel-setup(14)
+            # group-sync(20) zed-bridge(24) open-in-zed(14) usage-tui(16)
 ```
 
 ## Architecture / where things live
@@ -108,7 +109,10 @@ bin/cmux-codex-usage.sh     Codex usage poller (ChatGPT wham/usage endpoint; tok
 bin/cmux-sentinel-setup.sh  idempotent sentinel creation (per USAGE_PROVIDERS) + auto-naming guard probe.
 bin/cmux-group-sync.sh      workspace-GROUP name → anchor-title sync (opt-in GROUP_NAME_SYNC). split-marker / multi-window / --list|--raw|--update.
 hooks/cmux-bridge.sh        Claude Code → cmux agent-state bridge (⚡ working / ⏳ compacting / ❓ waiting-on-you rows).
-tests/                      bridge-state + poller-gate + codex-poller + install-hooks + sentinel-setup + group-sync. `make test`.
+hooks/zed-bridge.sh         OPT-IN (ZED_SENTINEL=1) cmux-free Zed bridge: same ⚡/⏳/❓ markers to OSC terminal-title + JSON sink.
+bin/cmux-open-in-zed.sh     OPT-IN cmux→Zed worktree handoff (`ze` alias / Ctrl-O via --shell-init). git-toplevel-aware; switch/--add/--new/--print.
+bin/zed-usage-tui.sh        OPT-IN usage meters rendered in a Zed terminal pane (reuses the pollers). No cmux writes.
+tests/                      bridge-state + poller-gate + codex-poller + install-hooks + sentinel-setup + group-sync + zed-bridge + open-in-zed + usage-tui. `make test`.
 examples/                   usage-sentinels.env + launchd plist templates (com.cmux-claude-usage / com.cmux-codex-usage / com.cmux-group-sync).
 ```
 

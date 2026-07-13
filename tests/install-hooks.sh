@@ -88,5 +88,51 @@ before="$(cat "$SETTINGS")"
 if [ "$rc" = 0 ]; then ok "install.sh still exited 0 without jq"; else bad "install.sh exited $rc without jq"; fi
 if [ "$(cat "$SETTINGS")" = "$before" ]; then ok "settings.json left untouched (no clobber)"; else bad "settings.json was modified without jq"; fi
 
+# ---- Zed integration (opt-in via --with-zed / WITH_ZED=1) --------------------
+# zed-bridge handles 8 of the 10 events (no StopFailure / PostToolUseFailure), so we
+# also assert it stays OFF those two — proves the event list, not just "wired".
+ZED_EVENTS="SessionStart UserPromptSubmit PreToolUse PreCompact PostCompact Notification Stop SessionEnd"
+# shellcheck disable=SC2088
+ZED='~/.claude/hooks/zed-bridge.sh'
+zedcount() { jq --arg e "$1" --arg c "$ZED" \
+  '[(.hooks[$e] // [])[].hooks[]? | select(.command == $c)] | length' "$SETTINGS" 2>/dev/null; }
+
+echo "T5: --with-zed (flag) wires zed-bridge for its 8 events + installs the helpers"
+( cd "$ROOT" && HOME="$SBX" bash "$INSTALL" --with-zed ) >/dev/null 2>&1; rc=$?
+if [ "$rc" = 0 ]; then ok "install.sh --with-zed exited 0"; else bad "install.sh --with-zed exited $rc"; fi
+zmiss=""
+for ev in $ZED_EVENTS; do
+  n="$(zedcount "$ev")"; case "$n" in ''|0) zmiss="$zmiss $ev" ;; esac
+done
+if [ -z "$zmiss" ]; then ok "all zed events reference zed-bridge"; else bad "zed events NOT wired:$zmiss"; fi
+zno=""
+for ev in StopFailure PostToolUseFailure; do
+  [ "$(zedcount "$ev")" = 0 ] || zno="$zno $ev=$(zedcount "$ev")"
+done
+if [ -z "$zno" ]; then ok "zed-bridge absent from cmux-only events"; else bad "zed-bridge wrongly on:$zno"; fi
+for f in .claude/hooks/zed-bridge.sh bin/cmux-open-in-zed.sh bin/zed-usage-tui.sh; do
+  if [ -x "$SBX/$f" ]; then ok "installed $f"; else bad "missing $f"; fi
+done
+
+echo "T6: WITH_ZED=1 (env form) re-run is idempotent; cmux path unaffected"
+( cd "$ROOT" && WITH_ZED=1 HOME="$SBX" bash "$INSTALL" ) >/dev/null 2>&1
+zdups=""
+for ev in $ZED_EVENTS; do
+  [ "$(zedcount "$ev")" = 1 ] || zdups="$zdups $ev=$(zedcount "$ev")"
+done
+if [ -z "$zdups" ]; then ok "every zed event has exactly one zed-bridge after re-run"; else bad "duplicate zed registrations:$zdups"; fi
+if [ "$(bridgecount SessionStart)" = 1 ]; then ok "cmux-bridge path unaffected by --with-zed"; else bad "cmux-bridge SessionStart count = $(bridgecount SessionStart)"; fi
+
+echo "T7: a default install (no flags/env) stays Zed-free; unknown flag rejected"
+SBX2="$ROOT/home2"; mkdir -p "$SBX2/.claude"
+( cd "$ROOT" && HOME="$SBX2" bash "$INSTALL" ) >/dev/null 2>&1; rc=$?
+if [ "$rc" = 0 ]; then ok "default install exited 0"; else bad "default install exited $rc"; fi
+if [ ! -e "$SBX2/.claude/hooks/zed-bridge.sh" ]; then ok "no zed-bridge.sh on default install"; else bad "zed-bridge.sh installed by default"; fi
+if [ ! -e "$SBX2/.claude/hooks/cmux-bridge.sh" ]; then ok "no cmux-bridge.sh on default install"; else bad "cmux-bridge.sh installed by default"; fi
+S2="$SBX2/.claude/settings.json"
+if [ ! -f "$S2" ] || ! grep -q -e cmux-bridge -e zed-bridge "$S2" 2>/dev/null; then ok "default settings carries no bridge hooks"; else bad "default install wrote bridge hooks"; fi
+( cd "$ROOT" && HOME="$SBX2" bash "$INSTALL" --bogus ) >/dev/null 2>&1; rc=$?
+if [ "$rc" = 2 ]; then ok "unknown flag → exit 2"; else bad "unknown flag exit $rc (want 2)"; fi
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
