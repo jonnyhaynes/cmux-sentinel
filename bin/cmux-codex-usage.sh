@@ -8,11 +8,16 @@
 #   GET https://chatgpt.com/backend-api/wham/usage
 # Auth is the ChatGPT OAuth token Codex stores (and refreshes) in
 # ~/.codex/auth.json (auth_mode="chatgpt"). The response carries LIVE server-side
-# utilization for the two windows our sentinels model:
+# utilization for the windows our sentinels model:
 #   { "rate_limit": {
 #       "primary_window":   { "used_percent": 7, "limit_window_seconds": 18000,  "reset_at": <epoch> },
 #       "secondary_window": { "used_percent": 3, "limit_window_seconds": 604800, "reset_at": <epoch> } } }
-#   primary = 18000s = 5h; secondary = 604800s = weekly.
+#   18000s = 5h → cx5h; 604800s = weekly → cx7d. CRITICAL: route each window to a
+#   sentinel by its ACTUAL limit_window_seconds, NOT by primary/secondary POSITION.
+#   OpenAI reshaped this live (2026-07-13): a Pro account returned the WEEKLY window
+#   in primary_window with secondary_window=null, so the old position map dumped
+#   weekly data into the 5h meter. A window may be absent for either bucket (renders
+#   "n/a", not a fake 0%). Short (<1d) → cx5h; long (>=1d) → cx7d.
 #
 # WHY HTTP, not the old rollout files: up to codex-cli ~0.140 the CLI wrote a
 # per-turn `rate_limits` snapshot into ~/.codex/sessions/**/rollout-*.jsonl and we
@@ -235,6 +240,26 @@ mark_offline() {
   _clear_progress "$LABEL_CX5H"; _clear_progress "$LABEL_CX7D"
 }
 
+# Write ONE Codex sentinel for --update: a real meter (unicode-bar title fallback +
+# native progress) when its window exists, or an honest "n/a" (no bar, progress
+# cleared) when OpenAI didn't return that window (e.g. no 5h window on a Pro plan).
+# Keeps the label prefix so resolve_ref + the sidebar anchor still match. Dies on a
+# missing/rejected sentinel, exactly like the inline path it replaced.
+_update_bucket() { # $1=label  $2=na(0/1)  $3=pct  $4=human_reset
+  local label="$1" na="$2" pct="${3:-0}" human="${4:-?}" bar dot frac err rc
+  if [ "$na" = 1 ]; then
+    err=$(_paint "$label" "$label  n/a"); rc=$?
+    [ "$rc" = 10 ] && die "no '$label' sentinel workspace (title \"$label\" or starting \"$label \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
+    [ "$rc" = 11 ] && die "rename rejected for $label sentinel: ${err:-no detail}"
+    _clear_progress "$label"
+    return
+  fi
+  bar=$(make_bar "$pct" 10); dot=$(sev_dot "$pct"); frac=$(to_frac "$pct")
+  err=$(_meter_write "$label" "$label ${bar} ${pct}% ${human}${dot}" "$frac" "${pct}% ${human}${dot}"); rc=$?
+  [ "$rc" = 10 ] && die "no '$label' sentinel workspace (title \"$label\" or starting \"$label \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
+  [ "$rc" = 11 ] && die "rename rejected for $label sentinel: ${err:-no detail}"
+}
+
 main() {
   local mode="${1:---print}" json
 
@@ -262,44 +287,43 @@ main() {
     return
   fi
 
-  local p5 p7 e5 e7 pct5 pct7 h5 h7
-  p5=$(printf '%s' "$json" | jq -c '.rate_limit.primary_window // empty' 2>/dev/null)
-  p7=$(printf '%s' "$json" | jq -c '.rate_limit.secondary_window // empty' 2>/dev/null)
-  if [ -z "$p5" ] && [ -z "$p7" ]; then
+  # Route each rate-limit window to a sentinel by its ACTUAL limit_window_seconds,
+  # NOT by primary/secondary POSITION (OpenAI reordered the shape — see the header).
+  # Short window (<1 day) → cx5h; long (>=1 day) → cx7d. Either bucket may be empty
+  # (that meter renders "n/a"); only both-empty is a hard error.
+  local wins win5h win7d pct5 pct7 h5 h7 na5=0 na7=0
+  wins=$(printf '%s' "$json" | jq -c '
+      [ .rate_limit.primary_window, .rate_limit.secondary_window ] | map(select(. != null))' 2>/dev/null)
+  win5h=$(printf '%s' "${wins:-[]}" | jq -c 'map(select((.limit_window_seconds // 0) <  86400)) | first // empty' 2>/dev/null)
+  win7d=$(printf '%s' "${wins:-[]}" | jq -c 'map(select((.limit_window_seconds // 0) >= 86400)) | first // empty' 2>/dev/null)
+  if [ -z "$win5h" ] && [ -z "$win7d" ]; then
     [ "$mode" = "--update" ] && mark_offline "no data"
     die "wham/usage returned no rate_limit windows (endpoint schema changed?)"
   fi
-  pct5=$(to_pct "$(printf '%s' "$p5" | jq -r '.used_percent // empty' 2>/dev/null)")
-  pct7=$(to_pct "$(printf '%s' "$p7" | jq -r '.used_percent // empty' 2>/dev/null)")
-  e5=$(reset_epoch "$p5"); e7=$(reset_epoch "$p7")
-  h5=$(humanize_until "$e5"); h7=$(humanize_until "$e7")
+  if [ -n "$win5h" ]; then
+    pct5=$(to_pct "$(printf '%s' "$win5h" | jq -r '.used_percent // empty' 2>/dev/null)")
+    h5=$(humanize_until "$(reset_epoch "$win5h")")
+  else na5=1; fi
+  if [ -n "$win7d" ]; then
+    pct7=$(to_pct "$(printf '%s' "$win7d" | jq -r '.used_percent // empty' 2>/dev/null)")
+    h7=$(humanize_until "$(reset_epoch "$win7d")")
+  else na7=1; fi
 
   if [ "$mode" = "--print" ]; then
-    echo "cx5h  ${pct5}%  · resets ${h5}"
-    echo "cx7d  ${pct7}%  · resets ${h7}"
+    if [ "$na5" = 1 ]; then echo "cx5h  n/a  · no 5h window"; else echo "cx5h  ${pct5}%  · resets ${h5}"; fi
+    if [ "$na7" = 1 ]; then echo "cx7d  n/a  · no weekly window"; else echo "cx7d  ${pct7}%  · resets ${h7}"; fi
     return
   fi
 
   if [ "$mode" = "--update" ]; then
     cmux ping &>/dev/null || die "cmux socket rejected (restart cmux to apply socketControlMode=automation)"
-    local bar5 bar7 dot5 dot7 frac5 frac7 lbl5 lbl7 err rc
-    bar5=$(make_bar "$pct5" 10); bar7=$(make_bar "$pct7" 10)
-    dot5=$(sev_dot "$pct5"); dot7=$(sev_dot "$pct7")
-    frac5=$(to_frac "$pct5"); frac7=$(to_frac "$pct7")
-    # Clean progress label (pct + reset + dot, NO unicode bar — the native
-    # ProgressView draws the bar). ASCII-led so the multibyte-prefix bug can't eat it.
-    lbl5="${pct5}% ${h5}${dot5}"
-    lbl7="${pct7}% ${h7}${dot7}"
-    # _meter_write resolves each sentinel by label (across windows) and writes the
-    # title (unicode-bar fallback + anchor) AND the native progress bar; rc 10 =
-    # sentinel missing (tell the user to create it), rc 11 = cmux rejected the rename.
-    err=$(_meter_write "$LABEL_CX5H" "$LABEL_CX5H ${bar5} ${pct5}% ${h5}${dot5}" "$frac5" "$lbl5"); rc=$?
-    [ "$rc" = 10 ] && die "no '$LABEL_CX5H' sentinel workspace (title \"$LABEL_CX5H\" or starting \"$LABEL_CX5H \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
-    [ "$rc" = 11 ] && die "rename rejected for $LABEL_CX5H sentinel: ${err:-no detail}"
-    err=$(_meter_write "$LABEL_CX7D" "$LABEL_CX7D ${bar7} ${pct7}% ${h7}${dot7}" "$frac7" "$lbl7"); rc=$?
-    [ "$rc" = 10 ] && die "no '$LABEL_CX7D' sentinel workspace (title \"$LABEL_CX7D\" or starting \"$LABEL_CX7D \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
-    [ "$rc" = 11 ] && die "rename rejected for $LABEL_CX7D sentinel: ${err:-no detail}"
-    echo "updated: ${LABEL_CX5H}=${pct5}% (${h5})  ${LABEL_CX7D}=${pct7}% (${h7})"
+    # Each bucket writes a real meter, or an honest "n/a" when its window is absent.
+    _update_bucket "$LABEL_CX5H" "$na5" "${pct5:-0}" "${h5:-?}"
+    _update_bucket "$LABEL_CX7D" "$na7" "${pct7:-0}" "${h7:-?}"
+    local sum5 sum7
+    if [ "$na5" = 1 ]; then sum5="n/a"; else sum5="${pct5}% (${h5})"; fi
+    if [ "$na7" = 1 ]; then sum7="n/a"; else sum7="${pct7}% (${h7})"; fi
+    echo "updated: ${LABEL_CX5H}=${sum5}  ${LABEL_CX7D}=${sum7}"
     return
   fi
 

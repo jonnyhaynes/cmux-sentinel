@@ -72,6 +72,17 @@ cat > "$ROOT/bin/curl" <<'FAKE'
 #!/bin/bash
 [ "${STUB_CURL:-fail}" = "ok" ] || exit 1
 if [ -n "${STUB_NOWINDOWS:-}" ]; then printf '{"plan_type":"pro","rate_limit":{}}\n'; exit 0; fi
+# STUB_WEEKLY_ONLY: the shape OpenAI actually returned 2026-07-13 — the WEEKLY window
+# (604800s) sits in primary_window with a null secondary. Duration routing must send
+# it to cx7d and mark cx5h n/a (position mapping used to mislabel it as the 5h meter).
+if [ -n "${STUB_WEEKLY_ONLY:-}" ]; then
+  printf '{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":%s,"limit_window_seconds":604800,"reset_after_seconds":573314},"secondary_window":null}}\n' "${STUB_P7:-1}"; exit 0
+fi
+# STUB_SWAP: weekly in primary, 5h in secondary — routing must key on
+# limit_window_seconds, NOT position, so cx5h still gets the 5h data and cx7d weekly.
+if [ -n "${STUB_SWAP:-}" ]; then
+  printf '{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":%s,"limit_window_seconds":604800,"reset_after_seconds":284962},"secondary_window":{"used_percent":%s,"limit_window_seconds":18000,"reset_after_seconds":6933}}}\n' "${STUB_P7:-3}" "${STUB_P5:-7}"; exit 0
+fi
 P5="${STUB_P5:-7}"; P7="${STUB_P7:-3}"
 printf '{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":%s,"limit_window_seconds":18000,"reset_after_seconds":6933},"secondary_window":{"used_percent":%s,"limit_window_seconds":604800,"reset_after_seconds":284962}}}\n' "$P5" "$P7"
 FAKE
@@ -154,6 +165,20 @@ reset; auth_chatgpt
 STUB_CURL=ok STUB_P5=55 STUB_P7=5 STUB_MULTIWIN=1 USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "multi-window --update" "$?" 0
 ckhas "cx5h renamed in other window" "cx5h "
 ckhas "cx5h pct via --window" "55%"
+
+echo "T8: weekly-only shape (primary=weekly 604800, secondary=null) → weekly→cx7d, cx5h=n/a"
+reset; auth_chatgpt
+STUB_CURL=ok STUB_WEEKLY_ONLY=1 STUB_P7=4 USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "weekly-only --update" "$?" 0
+ckhas "cx5h stamped n/a (no 5h window)" "cx5h  n/a"
+ckhas "cx7d carries the weekly pct" "cx7d.*4%"
+ckprog "cx7d native progress (4% → 0.04)" "PROG 0.04"
+ckprog "cx5h progress cleared (n/a → no bar)" "CLEAR"
+
+echo "T9: swapped windows (weekly in primary, 5h in secondary) → routed by DURATION, not position"
+reset; auth_chatgpt
+STUB_CURL=ok STUB_SWAP=1 STUB_P5=22 STUB_P7=8 USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "swapped --update" "$?" 0
+ckhas "cx5h gets the 5h pct (22%) despite living in secondary_window" "cx5h.*22%"
+ckhas "cx7d gets the weekly pct (8%) despite living in primary_window" "cx7d.*8%"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

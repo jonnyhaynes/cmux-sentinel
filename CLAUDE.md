@@ -96,7 +96,7 @@ cmux sidebar validate workspaces && cmux sidebar reload   # validate only PARSES
 ./bin/cmux-group-sync.sh --update      # rename group anchors to the group name (needs GROUP_NAME_SYNC=1)
 
 # offline tests (stub cmux/security/curl/$HOME — run in CI too)
-make test   # bridge-state(36) poller-gate(21) codex-poller(25) install-hooks(21) sentinel-setup(14)
+make test   # bridge-state(36) poller-gate(21) codex-poller(33) install-hooks(21) sentinel-setup(14)
             # group-sync(20) zed-bridge(24) open-in-zed(14) usage-tui(16)
 ```
 
