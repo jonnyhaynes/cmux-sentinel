@@ -16,15 +16,24 @@ break everything. Confirmed traps:
   compacting title markers via `.hasPrefix` and strips them with `.split`). An earlier note here
   claimed they render blank — that was WRONG on this build. `==` works too; use whichever is clearest.
 - **Avoid `||`** (unproven). Use an `if`-chain returning early. `&&` is fine and short-circuits.
-- **`progress` / `description` / `color` never reach the sidebar data** — not even for the SELECTED,
-  canonically-working workspace (proven by in-sidebar probe: `progN=0 descN=0`). They show in
-  `cmux sidebar-state` but stay `nil` in the sidebar's `workspaces[]`. So the **title** is the only
-  writable channel: usage meters AND agent working/compacting state all ride it (set via
-  `cmux rename-workspace`), never `set-progress`. **Re-probed on cmux 0.64.16** (via
-  `cmux rpc extension.sidebar.snapshot '{}'`): idle sentinels still report `progress: null`, so the
-  title bars stay necessary — recheck after each upgrade and switch to a native `ProgressView` only
-  if `progress` ever populates. Note `extension.sidebar.snapshot` returns the DATA model, not the
-  rendered tree, so it confirms inputs but still can't catch a parse-passes/render-blank (eyeball it).
+- **`progress` DOES reach the sidebar on cmux 0.64.17 — `description`/`color` still don't.** Earlier
+  probes concluded "`progress` never reaches" but every one checked an IDLE sentinel on which
+  `set-progress` was never called — so of course it read `null`. It's **null-until-set**: after
+  `cmux set-progress <0..1> --label <t>` the interpreter sees `w.progress.value` AND
+  `w.progress.label` (verified 2026-07-06 by an in-sidebar render probe — see
+  `.claude/research/2026-07-06-conductor-sidebar-analysis.md`). So the usage meters now draw a
+  **native `ProgressView`** off the progress channel, and the **title** stays the meter's
+  restart-proof ANCHOR (`resolve_ref`/`isClaudeMeter` key on it) AND the fallback the sidebar renders
+  whenever progress is absent — bootstrap, offline-cleared, a dropped write, or the window right
+  after an app restart before the next poll re-asserts it. The poller writes BOTH every run
+  (`_meter_write`), so the title path is never "ripped out" and restart-persistence of `progress` is
+  a non-issue (it self-heals within one poll). **Agent working/compacting/waiting state still rides
+  the title** (static markers, stripped for display) — a persistence + precedence choice, not a
+  channel limit. **CAVEAT — the snapshot RPC is the WRONG instrument for this:**
+  `cmux rpc extension.sidebar.snapshot '{}'` omits the `progress` key entirely even right after a
+  successful `set-progress` (that's how the old re-probe "confirmed" the wrong answer), and
+  `cmux sidebar-state` diverges too — only an in-sidebar `Text(...)`/render probe is authoritative,
+  so eyeball it. `description`/`color` remain untested/unreached on 0.64.17 (retest before relying).
 - **Sentinel resolution is multi-window + title-anchored.** `cmux workspace list` is window-scoped and
   launchd has no window context, so the pollers' `resolve_ref` tries the default window then scans
   `list-windows`, returning `ref⇥window` and renaming with `--window` (unambiguous positional ref).
@@ -44,9 +53,12 @@ break everything. Confirmed traps:
   reads a LIVE `$CMUX_WORKSPACE_ID` (still a UUID, set per-shell) instead of storing one. Don't
   reintroduce a stored id. The committed and deployed sidebars are now byte-identical (no id
   substitution at install).
-- **No native value bar for meters.** `ProgressView(value:)` needs a numeric `progress`, which idle
-  sentinels don't have — so meters are Unicode block text bars (`▏▎▍▌▋▊▉█`). Utilization **color**
-  can't come from data either; it's a colored emoji in the title (🟡/🔴).
+- **Meters use a native value bar now.** `ProgressView(value:)` needs a numeric `progress`; the
+  poller supplies it via `set-progress` (see the progress bullet above), so a meter row renders a
+  native `ProgressView` tinted from the value (red ≥90%, amber ≥70%, else blue) with
+  `w.progress.label` for the text. The Unicode block bar (`▏▎▍▌▋▊▉█`) baked into the title is the
+  FALLBACK the sidebar draws when `progress` is absent. The title's severity emoji (🟡/🔴) stays
+  because title **color** still can't come from data.
 - **Workspace-GROUP data NEVER reaches the sidebar interpreter** (probed 2026-06-19, see
   `.claude/research/2026-06-19-workspace-group-names-in-sidebar.md`). There is no `groups` binding and
   no per-workspace group field — referencing `groups` renders empty (the interpreter is lenient, it
@@ -84,7 +96,7 @@ cmux sidebar validate workspaces && cmux sidebar reload   # validate only PARSES
 ./bin/cmux-group-sync.sh --update      # rename group anchors to the group name (needs GROUP_NAME_SYNC=1)
 
 # offline tests (stub cmux/security/curl/$HOME — run in CI too)
-make test   # bridge-state(36) poller-gate(18) codex-poller(22) install-hooks(8) sentinel-setup(14) group-sync(20)
+make test   # bridge-state(36) poller-gate(21) codex-poller(25) install-hooks(8) sentinel-setup(14) group-sync(20)
 ```
 
 ## Architecture / where things live

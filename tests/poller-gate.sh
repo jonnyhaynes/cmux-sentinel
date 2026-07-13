@@ -24,6 +24,7 @@ mkdir -p "$ROOT/bin" "$ROOT/home/.claude" "$ROOT/home/.config/cmux"
 cat > "$ROOT/bin/cmux" <<'FAKE'
 #!/bin/bash
 LOG="$POLLERTEST/.renames"
+PLOG="$POLLERTEST/.progress"
 case "$1" in
   ping) exit 0 ;;
   workspace)
@@ -41,6 +42,11 @@ case "$1" in
     shift; title=""
     while [ $# -gt 0 ]; do case "$1" in --workspace) shift 2 ;; *) title="$1"; shift ;; esac; done
     printf '%s\n' "$title" >> "$LOG"; exit 0 ;;
+  set-progress)   # set-progress <value> --label <t> --workspace <ref> [--window <w>]
+    shift; val="$1"; shift; label=""
+    while [ $# -gt 0 ]; do case "$1" in --label) label="$2"; shift 2 ;; --workspace|--window) shift 2 ;; *) shift ;; esac; done
+    printf 'PROG %s | %s\n' "$val" "$label" >> "$PLOG"; exit 0 ;;
+  clear-progress) printf 'CLEAR\n' >> "$PLOG"; exit 0 ;;
   *) exit 0 ;;
 esac
 FAKE
@@ -64,6 +70,7 @@ export POLLERTEST="$ROOT" HOME="$ROOT/home" TMPDIR="$ROOT"
 PATH="$ROOT/bin:$PATH"
 CREDS="$ROOT/home/.claude/.credentials.json"
 RENAMES="$ROOT/.renames"
+PROGRESS="$ROOT/.progress"
 TOKEN_JSON='{"claudeAiOauth":{"accessToken":"faketoken"}}'
 
 pass=0; fail=0
@@ -73,7 +80,9 @@ ckno()   { if [ ! -s "$RENAMES" ]; then pass=$((pass + 1)); printf '  ✓ %s (wr
            else fail=$((fail + 1)); printf '  ✗ %s — unexpected renames:\n%s\n' "$1" "$(cat "$RENAMES")"; fi; }
 ckhas()  { if grep -q -- "$2" "$RENAMES" 2>/dev/null; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
            else fail=$((fail + 1)); printf '  ✗ %s — [%s] not in:\n%s\n' "$1" "$2" "$(cat "$RENAMES" 2>/dev/null)"; fi; }
-reset()  { rm -f "$RENAMES"; }
+ckprog() { if grep -q -- "$2" "$PROGRESS" 2>/dev/null; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
+           else fail=$((fail + 1)); printf '  ✗ %s — [%s] not in progress log:\n%s\n' "$1" "$2" "$(cat "$PROGRESS" 2>/dev/null)"; fi; }
+reset()  { rm -f "$RENAMES" "$PROGRESS"; }
 
 echo "T1: disabled (USAGE_PROVIDERS without claude) → exit 0, writes nothing"
 reset; printf '%s' "$TOKEN_JSON" > "$CREDS"          # installed, but explicitly disabled
@@ -89,13 +98,16 @@ echo "T3: installed + offline (creds present, fetch fails) → exit 1, ⚠ offli
 reset; printf '%s' "$TOKEN_JSON" > "$CREDS"
 STUB_CURL="fail" bash "$POLLER" --update; ckcode "installed+offline --update" "$?" 1
 ckhas "offline stamps ⚠" "⚠"
+ckprog "offline clears the native bar so the ⚠ title shows through" "CLEAR"
 
-echo "T4: installed + reachable → exit 0, bars written with percentages"
+echo "T4: installed + reachable → exit 0, bars + native progress written"
 reset
 STUB_CURL="ok" bash "$POLLER" --update; ckcode "installed+ok --update" "$?" 0
 ckhas "5h sentinel renamed" "5h "
 ckhas "5h utilization" "7%"
 ckhas "7d utilization" "42%"
+ckprog "5h native progress value (7% → 0.07)" "PROG 0.07"
+ckprog "7d native progress value (42% → 0.42)" "PROG 0.42"
 
 echo "T5: malformed utilization (over-100 / negative) → clamped, exit 0, no crash"
 reset

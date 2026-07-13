@@ -12,11 +12,13 @@
 //      "Waiting" is the bridge's way of saying Claude asked a question / hit a
 //      permission prompt — the row shows the orange needs-you treatment, not
 //      green "Working…", because the session is parked on YOU.
-//      (Why the title and not `progress`: cmux does NOT pass progress/description/
-//      color to custom-sidebar data on this build — proven by probe. Why STATIC:
-//      an animated marker in the title freezes cmux's sidebar — upstream #6291.
-//      The bridge ref-counts agents per workspace so multiple Claude/Codex
-//      sessions don't stomp the marker — see .claude/STATE-ARCHITECTURE.md.)
+//      (Why the title and not `progress` for agent state: the title is the
+//      persistent, restart-proof anchor and encodes the marker-precedence order;
+//      `progress` DOES reach the sidebar on 0.64.17 — meters use it — but it's
+//      transient. Why STATIC: an animated marker in the title freezes cmux's
+//      sidebar — upstream #6291. The bridge ref-counts agents per workspace so
+//      multiple Claude/Codex sessions don't stomp the marker — see
+//      .claude/STATE-ARCHITECTURE.md.)
 //   2. Repo state — branch · uncommitted · PR. Independent of any agent; its
 //      own row so it never competes with activity for the line.
 // Usage meters ride hidden "sentinel" workspaces (see isUsageMeter).
@@ -37,10 +39,10 @@ func hasProgressLabel(_ w) -> Bool {
 
 // ── dimension 1: agent activity ───────────────────────────────────
 // "Working" is detected from a marker the bridge injects at the FRONT of the
-// TITLE ("⚡ name"). cmux does NOT pass `progress`/`description`/`color` to
-// custom-sidebar data on this build (proven by probe: progN=0/descN=0 even for
-// the selected, working workspace), so the title is the only channel — and the
-// interpreter's `.hasPrefix` works here (also proven), so we can detect it.
+// TITLE ("⚡ name"). Agent state rides the title (not `progress`) because it must
+// be persistent and precedence-ordered; `progress` reaches the sidebar on 0.64.17
+// but is transient (meters use it — see meterRow). The interpreter's `.hasPrefix`
+// works here (proven), so we detect the marker on the title.
 func isWorking(_ w) -> Bool {
   return w.title.hasPrefix("⚡")
 }
@@ -169,6 +171,46 @@ func isUsageMeter(_ w) -> Bool {
   if isClaudeMeter(w) { return true }
   if isCodexMeter(w) { return true }
   return false
+}
+
+// ── native meter row (progress channel) ───────────────────────────
+// The poller writes each sentinel's utilization via `set-progress` (value 0..1 +
+// a clean label), which cmux 0.64.17 passes to the interpreter (null-until-set —
+// see .claude/research/2026-07-06-conductor-sidebar-analysis.md). So a meter is a
+// NATIVE ProgressView, not a unicode-block bar baked into the title. The title
+// stays the anchor (isClaudeMeter/resolve_ref) AND the fallback shown here
+// whenever progress is absent (bootstrap, offline-cleared, a dropped write, or
+// the first poll after an app restart).
+func meterWindow(_ w) -> String {   // leading token of the title: "5h"/"7d"/"cx5h"/"cx7d"
+  let parts = w.title.split(separator: " ")
+  if parts.count > 0 { return String(parts[0]) }
+  return w.title
+}
+func meterTint(_ w) -> String {     // color-from-data: red ≥90%, amber ≥70%, else blue
+  if hasProgress(w) {
+    if w.progress.value >= 0.9 { return "#F28779" }
+    if w.progress.value >= 0.7 { return "#FFCC66" }
+  }
+  return "#73D0FF"
+}
+func meterRow(_ w) -> some View {
+  VStack(alignment: .leading, spacing: 3) {
+    if hasProgress(w) {
+      HStack(spacing: 6) {
+        Text(meterWindow(w))
+          .font(.system(size: 12, design: .monospaced)).foregroundColor("#CCCAC2")
+        Spacer()
+        if hasProgressLabel(w) {
+          Text(w.progress.label)
+            .font(.system(size: 11, design: .monospaced)).foregroundColor("#8A9199")
+        }
+      }
+      ProgressView(value: w.progress.value).tint(meterTint(w))
+    } else {
+      Text(w.title)   // fallback: title still carries the unicode-bar text
+        .font(.system(size: 12, design: .monospaced)).foregroundColor("#CCCAC2")
+    }
+  }
 }
 
 // ── row visuals ───────────────────────────────────────────────────
@@ -333,9 +375,7 @@ VStack(alignment: .leading, spacing: 0) {
     VStack(alignment: .leading, spacing: 6) {
       Text("CLAUDE USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
       ForEach(workspaces.filter { isClaudeMeter($0) }.sorted { $0.title.contains("5h") && !$1.title.contains("5h") }) { w in
-        Text(w.title)
-          .font(.system(size: 12, design: .monospaced))
-          .foregroundColor("#CCCAC2")
+        meterRow(w)
       }
     }
     .padding(9)
@@ -348,9 +388,7 @@ VStack(alignment: .leading, spacing: 0) {
     VStack(alignment: .leading, spacing: 6) {
       Text("CODEX USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
       ForEach(workspaces.filter { isCodexMeter($0) }.sorted { $0.title.contains("5h") && !$1.title.contains("5h") }) { w in
-        Text(w.title)
-          .font(.system(size: 12, design: .monospaced))
-          .foregroundColor("#CCCAC2")
+        meterRow(w)
       }
     }
     .padding(9)

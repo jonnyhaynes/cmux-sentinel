@@ -113,6 +113,31 @@ _paint() { # $1 = label  $2 = new title
   return 0
 }
 
+# Resolve a sentinel ONCE, then write BOTH its title (restart-proof anchor +
+# unicode-bar fallback) and its native progress bar (value 0..1 + clean label),
+# which cmux 0.64.17 passes to the sidebar interpreter. The sidebar draws a native
+# ProgressView from it. Mirrors cmux-claude-usage.sh; see
+# .claude/research/2026-07-06-conductor-sidebar-analysis.md. Return: 0/10/11 as _paint.
+_meter_write() { # $1=label  $2=title  $3=progress_value(0..1)  $4=progress_label
+  local rw ref win err wargs=()
+  rw=$(resolve_ref "$1"); IFS=$'\t' read -r ref win <<<"$rw"
+  [ -n "$ref" ] || return 10
+  [ -n "$win" ] && wargs=(--window "$win")
+  err=$(cmux rename-workspace --workspace "$ref" ${wargs[@]+"${wargs[@]}"} "$2" 2>&1 >/dev/null) || { printf '%s' "$err"; return 11; }
+  cmux set-progress "$3" --label "$4" --workspace "$ref" ${wargs[@]+"${wargs[@]}"} >/dev/null 2>&1 || true
+  return 0
+}
+
+# Drop a sentinel's progress bar so the sidebar falls back to its TITLE (e.g. the
+# "⚠ offline" marker) instead of a stale native bar. Best-effort.
+_clear_progress() { # $1 = label
+  local rw ref win wargs=()
+  rw=$(resolve_ref "$1"); IFS=$'\t' read -r ref win <<<"$rw"
+  [ -n "$ref" ] || return 0
+  [ -n "$win" ] && wargs=(--window "$win")
+  cmux clear-progress --workspace "$ref" ${wargs[@]+"${wargs[@]}"} >/dev/null 2>&1 || true
+}
+
 # access token + account id, read FRESH each run (Codex refreshes auth.json).
 # Never printed/persisted. Sets CODEX_TOKEN / CODEX_ACCOUNT.
 read_token() {
@@ -186,6 +211,10 @@ to_pct() { # $1 = raw value (may be empty, null, or non-numeric)
     | round' 2>/dev/null || printf '0'
 }
 
+# clamped integer percent (0-100) -> fraction (0..1) for `set-progress`. $1 is a
+# sanitized int from to_pct, so argjson is safe; guard to 0 otherwise.
+to_frac() { jq -rn --argjson p "${1:-0}" '$p / 100' 2>/dev/null || printf '0'; }
+
 # Amber/red dot only when a limit is getting close (TRAILS the bar so the title
 # still starts with the label that resolve_ref + the sidebar anchor on).
 sev_dot() {
@@ -194,15 +223,16 @@ sev_dot() {
   elif [ "$p" -ge 70 ]; then printf ' 🟡'; fi
 }
 
-# Best-effort: stamp both sentinels offline so a frozen bar is obvious. Needs the
-# socket; no-ops if it can't reach cmux or resolve a sentinel. The marker still
-# starts with the label, so the sidebar keeps recognising it and resolve_ref still
-# finds it.
+# Best-effort: stamp both sentinels offline so a frozen bar is obvious, and drop the
+# native bar so the "⚠ offline" title shows through. Needs the socket; no-ops if it
+# can't reach cmux or resolve a sentinel. The marker still starts with the label, so
+# the sidebar keeps recognising it and resolve_ref still finds it.
 mark_offline() {
   local reason="${1:-offline}"
   cmux ping &>/dev/null || return 0
   _paint "$LABEL_CX5H" "$LABEL_CX5H  ⚠ ${reason}" >/dev/null 2>&1 || true
   _paint "$LABEL_CX7D" "$LABEL_CX7D  ⚠ ${reason}" >/dev/null 2>&1 || true
+  _clear_progress "$LABEL_CX5H"; _clear_progress "$LABEL_CX7D"
 }
 
 main() {
@@ -252,15 +282,21 @@ main() {
 
   if [ "$mode" = "--update" ]; then
     cmux ping &>/dev/null || die "cmux socket rejected (restart cmux to apply socketControlMode=automation)"
-    local bar5 bar7 dot5 dot7 err rc
+    local bar5 bar7 dot5 dot7 frac5 frac7 lbl5 lbl7 err rc
     bar5=$(make_bar "$pct5" 10); bar7=$(make_bar "$pct7" 10)
     dot5=$(sev_dot "$pct5"); dot7=$(sev_dot "$pct7")
-    # _paint resolves each sentinel by label (across windows) and writes the title;
-    # rc 10 = sentinel missing (tell the user to create it), rc 11 = cmux rejected.
-    err=$(_paint "$LABEL_CX5H" "$LABEL_CX5H ${bar5} ${pct5}% ${h5}${dot5}"); rc=$?
+    frac5=$(to_frac "$pct5"); frac7=$(to_frac "$pct7")
+    # Clean progress label (pct + reset + dot, NO unicode bar — the native
+    # ProgressView draws the bar). ASCII-led so the multibyte-prefix bug can't eat it.
+    lbl5="${pct5}% ${h5}${dot5}"
+    lbl7="${pct7}% ${h7}${dot7}"
+    # _meter_write resolves each sentinel by label (across windows) and writes the
+    # title (unicode-bar fallback + anchor) AND the native progress bar; rc 10 =
+    # sentinel missing (tell the user to create it), rc 11 = cmux rejected the rename.
+    err=$(_meter_write "$LABEL_CX5H" "$LABEL_CX5H ${bar5} ${pct5}% ${h5}${dot5}" "$frac5" "$lbl5"); rc=$?
     [ "$rc" = 10 ] && die "no '$LABEL_CX5H' sentinel workspace (title \"$LABEL_CX5H\" or starting \"$LABEL_CX5H \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
     [ "$rc" = 11 ] && die "rename rejected for $LABEL_CX5H sentinel: ${err:-no detail}"
-    err=$(_paint "$LABEL_CX7D" "$LABEL_CX7D ${bar7} ${pct7}% ${h7}${dot7}"); rc=$?
+    err=$(_meter_write "$LABEL_CX7D" "$LABEL_CX7D ${bar7} ${pct7}% ${h7}${dot7}" "$frac7" "$lbl7"); rc=$?
     [ "$rc" = 10 ] && die "no '$LABEL_CX7D' sentinel workspace (title \"$LABEL_CX7D\" or starting \"$LABEL_CX7D \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
     [ "$rc" = 11 ] && die "rename rejected for $LABEL_CX7D sentinel: ${err:-no detail}"
     echo "updated: ${LABEL_CX5H}=${pct5}% (${h5})  ${LABEL_CX7D}=${pct7}% (${h7})"

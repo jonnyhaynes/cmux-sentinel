@@ -31,6 +31,7 @@ mkdir -p "$ROOT/bin" "$ROOT/home/.config/cmux" "$ROOT/home/.codex"
 cat > "$ROOT/bin/cmux" <<'FAKE'
 #!/bin/bash
 LOG="$CODEXTEST/.renames"
+PLOG="$CODEXTEST/.progress"
 SENT='{"workspaces":[{"title":"cx5h","ref":"workspace:9"},{"title":"cx7d","ref":"workspace:10"}]}'
 case "$1" in
   ping) exit 0 ;;
@@ -53,6 +54,11 @@ case "$1" in
     # context would hit the wrong/no workspace, so reject it (forces correct --window).
     [ -n "${STUB_MULTIWIN:-}" ] && [ "$win" != "win-b" ] && exit 1
     printf '%s\n' "$title" >> "$LOG"; exit 0 ;;
+  set-progress)   # set-progress <value> --label <t> --workspace <ref> [--window <w>]
+    shift; val="$1"; shift; label=""
+    while [ $# -gt 0 ]; do case "$1" in --label) label="$2"; shift 2 ;; --workspace|--window) shift 2 ;; *) shift ;; esac; done
+    printf 'PROG %s | %s\n' "$val" "$label" >> "$PLOG"; exit 0 ;;
+  clear-progress) printf 'CLEAR\n' >> "$PLOG"; exit 0 ;;
   *) exit 0 ;;
 esac
 FAKE
@@ -77,6 +83,7 @@ export CODEXTEST="$ROOT" HOME="$ROOT/home" TMPDIR="$ROOT"
 # so the machine's real `curl` can't leak in and hit the network.
 PATH="$ROOT/bin:/usr/bin:/bin"
 RENAMES="$ROOT/.renames"
+PROGRESS="$ROOT/.progress"
 AUTH="$ROOT/home/.codex/auth.json"
 
 # auth.json variants: a valid ChatGPT-plan login, an API-key login (not covered by
@@ -92,7 +99,9 @@ ckno()   { if [ ! -s "$RENAMES" ]; then pass=$((pass + 1)); printf '  ✓ %s (wr
            else fail=$((fail + 1)); printf '  ✗ %s — unexpected renames:\n%s\n' "$1" "$(cat "$RENAMES")"; fi; }
 ckhas()  { if grep -q -- "$2" "$RENAMES" 2>/dev/null; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
            else fail=$((fail + 1)); printf '  ✗ %s — [%s] not in:\n%s\n' "$1" "$2" "$(cat "$RENAMES" 2>/dev/null)"; fi; }
-reset()  { rm -f "$RENAMES"; }
+ckprog() { if grep -q -- "$2" "$PROGRESS" 2>/dev/null; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
+           else fail=$((fail + 1)); printf '  ✗ %s — [%s] not in progress log:\n%s\n' "$1" "$2" "$(cat "$PROGRESS" 2>/dev/null)"; fi; }
+reset()  { rm -f "$RENAMES" "$PROGRESS"; }
 
 echo "T1: disabled (USAGE_PROVIDERS without codex) → exit 0, writes nothing"
 reset; auth_chatgpt
@@ -113,13 +122,16 @@ echo "T3: logged in + fetch fails (offline / expired token) → exit 1, ⚠ offl
 reset; auth_chatgpt
 STUB_CURL=fail USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "offline --update" "$?" 1
 ckhas "stamps ⚠" "⚠"
+ckprog "offline clears the native bar so the ⚠ title shows through" "CLEAR"
 
-echo "T4: logged in + populated → exit 0, cx5h/cx7d bars with percentages"
+echo "T4: logged in + populated → exit 0, cx5h/cx7d bars + native progress"
 reset; auth_chatgpt
 STUB_CURL=ok STUB_P5=33 STUB_P7=12 USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "populated --update" "$?" 0
 ckhas "cx5h sentinel renamed" "cx5h "
 ckhas "cx5h pct" "33%"
 ckhas "cx7d pct" "12%"
+ckprog "cx5h native progress value (33% → 0.33)" "PROG 0.33"
+ckprog "cx7d native progress value (12% → 0.12)" "PROG 0.12"
 
 echo "T5: response missing rate_limit windows (schema changed) → exit 1, ⚠ stamped"
 reset; auth_chatgpt
