@@ -77,14 +77,14 @@ cmux sidebar validate workspaces && cmux sidebar reload   # validate only PARSES
 ./bin/cmux-claude-usage.sh --print     # parsed values
 ./bin/cmux-claude-usage.sh --raw       # raw API JSON (no token)
 ./bin/cmux-claude-usage.sh --update    # actually renames the sentinels
-./bin/cmux-codex-usage.sh --print      # Codex: latest local rate_limits snapshot
-./bin/cmux-codex-usage.sh --raw        # raw rate_limits JSON from ~/.codex rollout
+./bin/cmux-codex-usage.sh --print      # Codex: live utilization from ChatGPT wham/usage
+./bin/cmux-codex-usage.sh --raw        # raw wham/usage JSON (token NOT included)
 ./bin/cmux-codex-usage.sh --update     # renames cx5h/cx7d (needs USAGE_PROVIDERS to list codex)
 ./bin/cmux-group-sync.sh --list        # workspace-GROUP names: which anchors are out of sync (read-only)
 ./bin/cmux-group-sync.sh --update      # rename group anchors to the group name (needs GROUP_NAME_SYNC=1)
 
 # offline tests (stub cmux/security/curl/$HOME — run in CI too)
-make test   # bridge-state(36) poller-gate(18) codex-poller(20) install-hooks(8) sentinel-setup(14) group-sync(20)
+make test   # bridge-state(36) poller-gate(18) codex-poller(22) install-hooks(8) sentinel-setup(14) group-sync(20)
 ```
 
 ## Architecture / where things live
@@ -92,7 +92,7 @@ make test   # bridge-state(36) poller-gate(18) codex-poller(20) install-hooks(8)
 ```text
 sidebars/workspaces.swift  the sidebar. isClaudeMeter()/isCodexMeter() = title-label `.hasPrefix` per provider; isUsageMeter() = any.
 bin/cmux-claude-usage.sh    Claude usage poller. make_bar / sev_dot / mark_offline / bucket_field / to_pct / resolve_ref(+_paint, multi-window).
-bin/cmux-codex-usage.sh     Codex usage poller (local ~/.codex rollout). latest_snapshot / make_bar / sev_dot / mark_stale / to_pct / resolve_ref(+_paint).
+bin/cmux-codex-usage.sh     Codex usage poller (ChatGPT wham/usage endpoint; token from ~/.codex/auth.json). read_token / fetch_usage / make_bar / sev_dot / mark_offline / to_pct / resolve_ref(+_paint).
 bin/cmux-sentinel-setup.sh  idempotent sentinel creation (per USAGE_PROVIDERS) + auto-naming guard probe.
 bin/cmux-group-sync.sh      workspace-GROUP name → anchor-title sync (opt-in GROUP_NAME_SYNC). split-marker / multi-window / --list|--raw|--update.
 hooks/cmux-bridge.sh        Claude Code → cmux agent-state bridge (⚡ working / ⏳ compacting / ❓ waiting-on-you rows).
@@ -117,13 +117,17 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
 - **Usage meters group by provider:** each provider gets its own labelled panel section
   (`CLAUDE USAGE`, `CODEX USAGE`, …) — same component reused. A meter is just an idle "sentinel"
   workspace whose title a poller keeps updated. **Two providers ship:** Claude
-  (`bin/cmux-claude-usage.sh`, OAuth usage endpoint) and Codex (`bin/cmux-codex-usage.sh`). Codex
-  needs **no token/network** — it reads `rate_limits` (`primary`=5h, `secondary`=weekly) from the
-  LATEST non-null snapshot in `~/.codex/sessions/**/rollout-*.jsonl` (the schema is
-  community-observed, not an OpenAI contract, and `rate_limits` is often `null` esp. in `codex
-  exec` — openai/codex#14880 — so the poller scans newest-first and stamps `⚠ stale` if none is
-  usable; labels `cx5h`/`cx7d`). Decision/research:
-  `.claude/research/2026-06-19-codex-usage-data-source.md`. To add a THIRD provider: create a
+  (`bin/cmux-claude-usage.sh`, OAuth usage endpoint) and Codex (`bin/cmux-codex-usage.sh`). BOTH now
+  hit a provider **usage endpoint** with a locally-stored OAuth token: Codex reads ChatGPT's
+  `wham/usage` (the same endpoint the Codex CLI's own 60s poller hits — openai/codex#10869), token
+  read fresh from `~/.codex/auth.json` (`auth_mode=chatgpt`); `primary_window`=5h /
+  `secondary_window`=weekly → labels `cx5h`/`cx7d`. The OLD local-rollout source
+  (`~/.codex/sessions/**/rollout-*.jsonl`) is DEAD on codex-cli 0.142.x — `codex exec` (how Claude
+  Code drives Codex) doesn't write `rate_limits` (openai/codex#14880) and fresh data moved to
+  non-queryable sqlite, so the meter went weeks-stale; the endpoint is account-server-side, so it's
+  correct for any usage pattern. `wham/usage` is unofficial → parse defensively; API-key logins
+  aren't covered (no panel). Decision/research:
+  `.claude/research/2026-07-06-codex-usage-api-source.md`. To add a THIRD provider: create a
   sentinel, add an `isXMeter()` predicate + an `if isXMeter(w)` line to `isUsageMeter()` + an
   `X USAGE` panel section, and copy a poller with a new data source.
 - **Provider selection is gated, not configured in the sidebar** (it can't read config — only

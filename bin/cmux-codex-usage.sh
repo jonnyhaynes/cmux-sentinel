@@ -1,57 +1,53 @@
 #!/bin/bash
-# cmux-codex-usage.sh — feed OpenAI Codex CLI rate-limit utilization into the cmux
-# custom sidebar via two "sentinel" workspaces' titles (cx5h + cx7d). Sibling of
-# cmux-claude-usage.sh; same display channel, different data source.
+# cmux-codex-usage.sh — feed OpenAI Codex (ChatGPT-plan) rate-limit utilization
+# into the cmux custom sidebar via two "sentinel" workspaces (cx5h + cx7d).
+# Sibling of cmux-claude-usage.sh; same display channel, HTTP data source.
 #
-# Data source: LOCAL, no token, no network. Codex CLI writes a per-turn rate-limit
-# snapshot into its session rollout files:
-#   ~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<uuid>.jsonl
-# Each populated snapshot carries a "rate_limits" object:
-#   { "primary":   { "used_percent": 8.0, "window_minutes": 300,   "resets_at": <epoch> },
-#     "secondary": { "used_percent": 1.0, "window_minutes": 10080, "resets_at": <epoch> } }
-# primary = 300 min = the rolling 5-hour window; secondary = 10080 min = the weekly
-# window — the same two windows the Claude meter shows. We read the LATEST non-null
-# snapshot (newest file first) and paint the bars.
+# Data source: Codex's own usage endpoint — the SAME one the CLI's built-in
+# 60-second poller hits (openai/codex#10869):
+#   GET https://chatgpt.com/backend-api/wham/usage
+# Auth is the ChatGPT OAuth token Codex stores (and refreshes) in
+# ~/.codex/auth.json (auth_mode="chatgpt"). The response carries LIVE server-side
+# utilization for the two windows our sentinels model:
+#   { "rate_limit": {
+#       "primary_window":   { "used_percent": 7, "limit_window_seconds": 18000,  "reset_at": <epoch> },
+#       "secondary_window": { "used_percent": 3, "limit_window_seconds": 604800, "reset_at": <epoch> } } }
+#   primary = 18000s = 5h; secondary = 604800s = weekly.
 #
-# CAVEATS (researched — see .claude/research/2026-06-19-codex-usage-data-source.md):
-#   * This schema is COMMUNITY-OBSERVED, not an OpenAI-documented contract — so we
-#     parse defensively (recursive search for rate_limits; tolerate missing keys;
-#     accept resets_at OR resets_in_seconds).
-#   * rate_limits is frequently `null`, especially in `codex exec`/non-interactive
-#     runs (openai/codex #14880, #14728). So we scan newest-first for the latest
-#     NON-null snapshot and stamp "⚠ stale" if none is found.
-#   * The snapshot only advances when Codex makes a request — when Codex is idle the
-#     numbers are last-known. That's fine (usage only changes with use); a very old
-#     snapshot is surfaced as "⚠ stale".
+# WHY HTTP, not the old rollout files: up to codex-cli ~0.140 the CLI wrote a
+# per-turn `rate_limits` snapshot into ~/.codex/sessions/**/rollout-*.jsonl and we
+# read the newest (see .claude/research/2026-06-19-codex-usage-data-source.md).
+# On codex-cli 0.142.x that source is DEAD for real usage: rollouts are only
+# written by the interactive TUI (not `codex exec`, which is how Claude Code drives
+# Codex — openai/codex#14880), and the fresh data moved into sqlite logs that don't
+# expose the payload queryably. So a machine that uses Codex via Claude Code shows a
+# weeks-stale bar. The wham/usage endpoint is account-server-side, so it's correct
+# for ANY usage pattern. Decision: .claude/research/2026-07-06-codex-usage-api-source.md.
 #
-# Display channel: same as the Claude meter — the sidebar can't read idle-workspace
-# progress, so we encode a unicode-block bar in the sentinel TITLE via
-# rename-workspace ("cx5h ███░░░░░░░ 8% 4h50m") and the sidebar matches by the
-# title label ("cx5h "/"cx7d ", via .hasPrefix). cmux 0.64.15 dropped stable
-# workspace UUIDs, so we re-resolve each sentinel's ref by title every run.
+# The OAuth token is read FRESH from ~/.codex/auth.json each run (Codex refreshes it
+# there). It is never printed or persisted.
 #
 # Modes:
-#   --print     parse + print values (no cmux writes)
-#   --raw       print the latest raw rate_limits JSON snapshot
-#   --update    rename both sentinel workspaces with bars (for launchd)
+#   --print     fetch + print parsed values (no cmux writes)
+#   --raw       fetch + print the raw wham/usage JSON
+#   --update    fetch + paint both sentinel workspaces (title + native progress bar)
 #
 # Provider gating: this is the CODEX provider; it SELF-GATES so it never errors or
 # shows a panel when Codex is absent/disabled (the sidebar hides a provider whose
 # sentinels are missing):
 #   * disabled (USAGE_PROVIDERS doesn't list "codex"; default is "claude") → exit 0.
-#   * not installed (no `codex` binary AND no ~/.codex/sessions) → exit 0.
-#   * installed but no usable snapshot → "⚠ stale" (like the Claude offline stamp).
+#   * not logged in on a ChatGPT plan (no ~/.codex/auth.json, or auth_mode != chatgpt,
+#     e.g. API-key users whom wham/usage doesn't cover) → exit 0, do nothing.
+#   * logged in but the fetch fails (expired token / offline) → transient "⚠ offline".
 # Config: ~/.config/cmux/usage-sentinels.env
 #   SENTINEL_CX5H_LABEL=cx5h   SENTINEL_CX7D_LABEL=cx7d
 #   USAGE_PROVIDERS="claude codex"   # add "codex" to enable this poller
 
 set -uo pipefail
 
-SESSIONS_DIR="$HOME/.codex/sessions"
+USAGE_ENDPOINT="https://chatgpt.com/backend-api/wham/usage"
+AUTH_JSON="${CODEX_AUTH_JSON:-$HOME/.codex/auth.json}"
 SENTINELS_ENV="$HOME/.config/cmux/usage-sentinels.env"
-# How many of the newest rollout files to scan before giving up (bounds work — the
-# newest file almost always carries the latest snapshot).
-CODEX_SCAN_MAX="${CODEX_SCAN_MAX:-8}"
 
 # shellcheck disable=SC1090
 [ -f "$SENTINELS_ENV" ] && source "$SENTINELS_ENV"
@@ -61,18 +57,25 @@ LABEL_CX7D="${SENTINEL_CX7D_LABEL:-cx7d}"
 PROVIDER_ID="codex"
 USAGE_PROVIDERS="${USAGE_PROVIDERS:-claude}"
 
+# Token + account id read fresh from auth.json each run (set by read_token).
+CODEX_TOKEN=""; CODEX_ACCOUNT=""
+
 die() { echo "ERR: $*" >&2; exit 1; }
 
 provider_enabled() {
   case " $USAGE_PROVIDERS " in *" $PROVIDER_ID "*) return 0 ;; *) return 1 ;; esac
 }
 
-# Is Codex installed/used HERE? True iff the CLI is on PATH or it has written
-# sessions. No source ⇒ nothing to meter (distinct from "no snapshot yet").
+# Is Codex usable HERE? True iff logged into a ChatGPT plan: auth.json exists with
+# auth_mode="chatgpt" and an access token. API-key users (auth_mode="apikey") aren't
+# metered by wham/usage, so they're treated as "nothing to meter" (distinct from an
+# EXPIRED chatgpt token, which still has creds and falls through to '⚠ offline').
 provider_available() {
-  command -v codex >/dev/null 2>&1 && return 0
-  [ -d "$SESSIONS_DIR" ] && return 0
-  return 1
+  [ -f "$AUTH_JSON" ] || return 1
+  local mode tok
+  mode=$(jq -r '.auth_mode // empty' "$AUTH_JSON" 2>/dev/null)
+  tok=$(jq -r '.tokens.access_token // empty' "$AUTH_JSON" 2>/dev/null)
+  [ "$mode" = "chatgpt" ] && [ -n "$tok" ]
 }
 
 # Resolve a sentinel's current ref by its title label (refs rotate across cmux
@@ -110,18 +113,24 @@ _paint() { # $1 = label  $2 = new title
   return 0
 }
 
-# Latest NON-null rate_limits snapshot across the newest rollout files. Recursive
-# (`.. | objects`) so we don't depend on the (unofficial) nesting path. Prints the
-# rate_limits JSON object, or empty + non-zero if none found.
-latest_snapshot() {
-  local f rl
-  [ -d "$SESSIONS_DIR" ] || return 1
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    rl=$(jq -c '[.. | objects | select(has("rate_limits")) | .rate_limits | select(.primary != null)] | last // empty' "$f" 2>/dev/null | tail -1)
-    if [ -n "$rl" ]; then printf '%s' "$rl"; return 0; fi
-  done < <(find "$SESSIONS_DIR" -name 'rollout-*.jsonl' 2>/dev/null | sort -r | head -n "$CODEX_SCAN_MAX")
-  return 1
+# access token + account id, read FRESH each run (Codex refreshes auth.json).
+# Never printed/persisted. Sets CODEX_TOKEN / CODEX_ACCOUNT.
+read_token() {
+  [ -f "$AUTH_JSON" ] || die "no Codex auth (~/.codex/auth.json — run: codex login)"
+  CODEX_TOKEN=$(jq -r '.tokens.access_token // empty' "$AUTH_JSON" 2>/dev/null)
+  CODEX_ACCOUNT=$(jq -r '.tokens.account_id // empty' "$AUTH_JSON" 2>/dev/null)
+  [ -n "$CODEX_TOKEN" ] || die "no access_token in ~/.codex/auth.json (run: codex login)"
+}
+
+# Hit wham/usage with the same auth shape the Codex CLI uses. -f → curl fails
+# (non-zero) on 4xx/5xx so an expired token surfaces as a fetch failure (→ offline).
+fetch_usage() {
+  curl -fsS --max-time 15 "$USAGE_ENDPOINT" \
+    -H "Authorization: Bearer $CODEX_TOKEN" \
+    -H "chatgpt-account-id: $CODEX_ACCOUNT" \
+    -H "originator: codex_cli_rs" \
+    -H "User-Agent: codex_cli_rs" \
+    -H "Content-Type: application/json"
 }
 
 # epoch -> compact "in" duration: "now" | "37m" | "4h12m" | "2d3h"
@@ -137,13 +146,13 @@ humanize_until() {
   else echo "${m}m"; fi
 }
 
-# A window's reset epoch: prefer resets_at (absolute), else now + resets_in_seconds.
+# A window's reset epoch: prefer reset_at (absolute), else now + reset_after_seconds.
 reset_epoch() { # $1 = window JSON
   local at rel
-  at=$(printf '%s' "$1" | jq -r '.resets_at // empty' 2>/dev/null)
+  at=$(printf '%s' "$1" | jq -r '.reset_at // empty' 2>/dev/null)
   case "$at" in '' | null) : ;; *[!0-9]*) at="" ;; esac
   if [ -n "$at" ]; then printf '%s' "$at"; return; fi
-  rel=$(printf '%s' "$1" | jq -r '.resets_in_seconds // empty' 2>/dev/null)
+  rel=$(printf '%s' "$1" | jq -r '.reset_after_seconds // empty' 2>/dev/null)
   case "$rel" in '' | *[!0-9]*) printf ''; return ;; esac
   printf '%s' "$(( $(date +%s) + rel ))"
 }
@@ -168,7 +177,7 @@ make_bar() {
 }
 
 # Coerce an arbitrary value to a clamped integer percent (0-100), rounded, entirely
-# in jq — the rate_limits schema is community-observed, so a missing/null/string
+# in jq — the response is an unofficial endpoint, so a missing/null/string
 # used_percent must clamp to 0 rather than break or inject the shell.
 to_pct() { # $1 = raw value (may be empty, null, or non-numeric)
   jq -rn --arg v "${1:-}" '
@@ -185,44 +194,51 @@ sev_dot() {
   elif [ "$p" -ge 70 ]; then printf ' 🟡'; fi
 }
 
-# Stamp both sentinels stale so a frozen bar is obvious. Needs the socket; no-ops
-# if it can't reach cmux or resolve a sentinel. "⚠ stale" still starts with the
-# label, so the sidebar keeps recognising it and resolve_ref still finds it.
-mark_stale() {
-  local reason="${1:-stale}"
+# Best-effort: stamp both sentinels offline so a frozen bar is obvious. Needs the
+# socket; no-ops if it can't reach cmux or resolve a sentinel. The marker still
+# starts with the label, so the sidebar keeps recognising it and resolve_ref still
+# finds it.
+mark_offline() {
+  local reason="${1:-offline}"
   cmux ping &>/dev/null || return 0
   _paint "$LABEL_CX5H" "$LABEL_CX5H  ⚠ ${reason}" >/dev/null 2>&1 || true
   _paint "$LABEL_CX7D" "$LABEL_CX7D  ⚠ ${reason}" >/dev/null 2>&1 || true
 }
 
 main() {
-  local mode="${1:---print}" rl
+  local mode="${1:---print}" json
 
-  # Provider gate (robustness): a disabled or not-installed provider is a clean
+  # Provider gate (robustness): a disabled or not-logged-in provider is a clean
   # no-op — no error spam, no broken panel. The sidebar hides a provider whose
-  # sentinels are absent, so exit 0 here = no panel.
+  # sentinels are absent, so exit 0 here = no panel. An EXPIRED token is NOT caught
+  # here (auth.json still exists) — it falls through to the transient '⚠ offline'.
   if ! provider_enabled; then
     echo "codex disabled (USAGE_PROVIDERS=\"$USAGE_PROVIDERS\") — nothing to do" >&2
     exit 0
   fi
   if ! provider_available; then
-    echo "Codex not installed here (no \`codex\` binary / ~/.codex/sessions) — nothing to meter" >&2
+    echo "Codex not logged in on a ChatGPT plan (no ~/.codex/auth.json chatgpt token) — nothing to meter" >&2
     exit 0
   fi
 
-  rl=$(latest_snapshot) || {
-    [ "$mode" = "--update" ] && mark_stale "no data"
-    die "no usable rate_limits snapshot in the newest $CODEX_SCAN_MAX rollout files (codex exec only? see #14880)"
+  read_token || { [ "$mode" = "--update" ] && mark_offline "no token"; exit 1; }
+  json=$(fetch_usage) || {
+    [ "$mode" = "--update" ] && mark_offline "offline"
+    die "wham/usage request failed (token expired? endpoint changed? offline?)"
   }
 
   if [ "$mode" = "--raw" ]; then
-    printf '%s\n' "$rl" | jq . 2>/dev/null || printf '%s\n' "$rl"
+    printf '%s\n' "$json" | jq . 2>/dev/null || printf '%s\n' "$json"
     return
   fi
 
   local p5 p7 e5 e7 pct5 pct7 h5 h7
-  p5=$(printf '%s' "$rl" | jq -c '.primary')
-  p7=$(printf '%s' "$rl" | jq -c '.secondary')
+  p5=$(printf '%s' "$json" | jq -c '.rate_limit.primary_window // empty' 2>/dev/null)
+  p7=$(printf '%s' "$json" | jq -c '.rate_limit.secondary_window // empty' 2>/dev/null)
+  if [ -z "$p5" ] && [ -z "$p7" ]; then
+    [ "$mode" = "--update" ] && mark_offline "no data"
+    die "wham/usage returned no rate_limit windows (endpoint schema changed?)"
+  fi
   pct5=$(to_pct "$(printf '%s' "$p5" | jq -r '.used_percent // empty' 2>/dev/null)")
   pct7=$(to_pct "$(printf '%s' "$p7" | jq -r '.used_percent // empty' 2>/dev/null)")
   e5=$(reset_epoch "$p5"); e7=$(reset_epoch "$p7")

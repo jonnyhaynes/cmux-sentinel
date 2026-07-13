@@ -1,11 +1,12 @@
 #!/bin/bash
 # codex-poller.sh — offline test for bin/cmux-codex-usage.sh.
 #
-# Stubs codex (presence), cmux, and a throwaway $HOME holding fake Codex rollout
-# files, so it runs in CI on Linux too. PATH is restricted to keep the REAL codex
-# binary out (so "not installed" is testable), with jq symlinked in. Asserts:
-# disabled / not-installed / no-usable-snapshot(⚠ stale) / populated(bars) and the
-# newest-first non-null fallback across files.
+# The Codex poller now reads LIVE utilization from the ChatGPT wham/usage endpoint
+# (auth token in ~/.codex/auth.json), not the old rollout files. So this stubs
+# curl (network), cmux, and a throwaway $HOME holding a fake auth.json, and runs in
+# CI on Linux too. PATH is restricted (stubs first, no /opt/homebrew/bin) with jq
+# symlinked in. Asserts: disabled / not-logged-in / apikey-mode / offline(⚠) /
+# populated(bars) / no-windows(⚠) / clamping / multi-window --window targeting.
 #
 # Run:  make test   (or:  bash tests/codex-poller.sh)
 set -u
@@ -18,9 +19,7 @@ JQ="$(command -v jq)" || { echo "jq required for this test" >&2; exit 2; }
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cmux-codex-test.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT
-mkdir -p "$ROOT/bin" "$ROOT/home/.config/cmux"
-SESS="$ROOT/home/.codex/sessions/2026/06"
-mkdir -p "$SESS"
+mkdir -p "$ROOT/bin" "$ROOT/home/.config/cmux" "$ROOT/home/.codex"
 
 # Fake cmux: ping ok; workspace list --json serves the two codex sentinels with
 # their BARE labels (the real first-run state — no bar appended yet, which the
@@ -58,22 +57,33 @@ case "$1" in
 esac
 FAKE
 chmod +x "$ROOT/bin/cmux"
+
+# Fake curl: STUB_CURL=ok → emit a wham/usage-shaped JSON (percentages from
+# STUB_P5/STUB_P7, interpolated raw so "abc"/null/150/-5 are all testable);
+# STUB_NOWINDOWS=1 → a response with an empty rate_limit (schema-changed case);
+# otherwise fail like `curl -f` on a 4xx/5xx (offline / expired token).
+cat > "$ROOT/bin/curl" <<'FAKE'
+#!/bin/bash
+[ "${STUB_CURL:-fail}" = "ok" ] || exit 1
+if [ -n "${STUB_NOWINDOWS:-}" ]; then printf '{"plan_type":"pro","rate_limit":{}}\n'; exit 0; fi
+P5="${STUB_P5:-7}"; P7="${STUB_P7:-3}"
+printf '{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":%s,"limit_window_seconds":18000,"reset_after_seconds":6933},"secondary_window":{"used_percent":%s,"limit_window_seconds":604800,"reset_after_seconds":284962}}}\n' "$P5" "$P7"
+FAKE
+chmod +x "$ROOT/bin/curl"
 ln -s "$JQ" "$ROOT/bin/jq"   # keep jq reachable under the restricted PATH
 
 export CODEXTEST="$ROOT" HOME="$ROOT/home" TMPDIR="$ROOT"
 # Restricted PATH: stubs first, then core dirs — deliberately NOT /opt/homebrew/bin,
-# so the machine's real `codex` can't leak into "not installed" cases.
+# so the machine's real `curl` can't leak in and hit the network.
 PATH="$ROOT/bin:/usr/bin:/bin"
 RENAMES="$ROOT/.renames"
-NOW=$(date +%s); R5=$((NOW + 18000)); R7=$((NOW + 604800))
+AUTH="$ROOT/home/.codex/auth.json"
 
-snap() { # $1=primary_pct $2=secondary_pct  → one populated rollout line
-  printf '{"type":"token_count","payload":{"rate_limits":{"limit_id":"codex","primary":{"used_percent":%s,"window_minutes":300,"resets_at":%s},"secondary":{"used_percent":%s,"window_minutes":10080,"resets_at":%s}}}}\n' "$1" "$R5" "$2" "$R7"
-}
-nullsnap() { printf '{"type":"token_count","payload":{"rate_limits":null}}\n'; }
-
-codex_stub() { printf '#!/bin/bash\nexit 0\n' > "$ROOT/bin/codex"; chmod +x "$ROOT/bin/codex"; }
-no_codex()   { rm -f "$ROOT/bin/codex"; }
+# auth.json variants: a valid ChatGPT-plan login, an API-key login (not covered by
+# wham/usage → treated as not-available), and none.
+auth_chatgpt() { printf '{"auth_mode":"chatgpt","tokens":{"access_token":"faketoken","account_id":"acct-123"}}\n' > "$AUTH"; }
+auth_apikey()  { printf '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-fake"}\n' > "$AUTH"; }
+no_auth()      { rm -f "$AUTH"; }
 
 pass=0; fail=0
 ckcode() { if [ "$2" = "$3" ]; then pass=$((pass + 1)); printf '  ✓ %s (exit %s)\n' "$1" "$2"
@@ -82,52 +92,54 @@ ckno()   { if [ ! -s "$RENAMES" ]; then pass=$((pass + 1)); printf '  ✓ %s (wr
            else fail=$((fail + 1)); printf '  ✗ %s — unexpected renames:\n%s\n' "$1" "$(cat "$RENAMES")"; fi; }
 ckhas()  { if grep -q -- "$2" "$RENAMES" 2>/dev/null; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
            else fail=$((fail + 1)); printf '  ✗ %s — [%s] not in:\n%s\n' "$1" "$2" "$(cat "$RENAMES" 2>/dev/null)"; fi; }
-reset()  { rm -f "$RENAMES" "$SESS"/rollout-*.jsonl; }
+reset()  { rm -f "$RENAMES"; }
 
 echo "T1: disabled (USAGE_PROVIDERS without codex) → exit 0, writes nothing"
-reset; codex_stub; snap 33 12 > "$SESS/rollout-2026-06-19T06-00-00-aaaa.jsonl"
-USAGE_PROVIDERS="claude" bash "$POLLER" --update; ckcode "disabled --update" "$?" 0
+reset; auth_chatgpt
+STUB_CURL=ok USAGE_PROVIDERS="claude" bash "$POLLER" --update; ckcode "disabled --update" "$?" 0
 ckno "disabled is a no-op"
 
-echo "T2: not installed (no codex binary, no ~/.codex/sessions) → exit 0, nothing"
-reset; no_codex; rm -rf "$ROOT/home/.codex"
-USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "not-installed --update" "$?" 0
-ckno "not-installed is a no-op"
-mkdir -p "$SESS"   # restore for later tests
+echo "T2: not logged in (no ~/.codex/auth.json) → exit 0, nothing"
+reset; no_auth
+STUB_CURL=ok USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "not-logged-in --update" "$?" 0
+ckno "not-logged-in is a no-op"
 
-echo "T3: installed + no usable snapshot (only null) → exit 1, ⚠ stale stamped"
-reset; codex_stub; nullsnap > "$SESS/rollout-2026-06-19T06-00-00-bbbb.jsonl"
-USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "no-snapshot --update" "$?" 1
+echo "T2b: API-key auth (auth_mode!=chatgpt, not covered by wham/usage) → exit 0, nothing"
+reset; auth_apikey
+STUB_CURL=ok USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "apikey --update" "$?" 0
+ckno "apikey mode is a no-op"
+
+echo "T3: logged in + fetch fails (offline / expired token) → exit 1, ⚠ offline stamped"
+reset; auth_chatgpt
+STUB_CURL=fail USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "offline --update" "$?" 1
 ckhas "stamps ⚠" "⚠"
 
-echo "T4: installed + populated → exit 0, cx5h/cx7d bars with percentages"
-reset; codex_stub; snap 33 12 > "$SESS/rollout-2026-06-19T06-00-00-cccc.jsonl"
-USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "populated --update" "$?" 0
+echo "T4: logged in + populated → exit 0, cx5h/cx7d bars with percentages"
+reset; auth_chatgpt
+STUB_CURL=ok STUB_P5=33 STUB_P7=12 USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "populated --update" "$?" 0
 ckhas "cx5h sentinel renamed" "cx5h "
 ckhas "cx5h pct" "33%"
 ckhas "cx7d pct" "12%"
 
-echo "T5: newest file is null-only → falls back to latest non-null in older file"
-reset; codex_stub
-nullsnap > "$SESS/rollout-2026-06-19T09-00-00-dddd.jsonl"   # newest, useless
-snap 47 7 > "$SESS/rollout-2026-06-19T06-00-00-eeee.jsonl"  # older, populated
-USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "fallback --update" "$?" 0
-ckhas "fell back to older snapshot" "47%"
+echo "T5: response missing rate_limit windows (schema changed) → exit 1, ⚠ stamped"
+reset; auth_chatgpt
+STUB_CURL=ok STUB_NOWINDOWS=1 USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "no-windows --update" "$?" 1
+ckhas "stamps ⚠ on no data" "⚠"
 
 echo "T6: malformed used_percent (over-100 / negative) → clamped, exit 0, no crash"
-reset; codex_stub; snap 150 -5 > "$SESS/rollout-2026-06-19T06-00-00-ffff.jsonl"
-USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "over/under --update" "$?" 0
+reset; auth_chatgpt
+STUB_CURL=ok STUB_P5=150 STUB_P7=-5 USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "over/under --update" "$?" 0
 ckhas "over-100 clamped to 100%" "100%"
 ckhas "negative clamped to 0%" "0%"
 
 echo "T6b: non-numeric / null used_percent → 0%, exit 0, no crash"
-reset; codex_stub; snap '"abc"' null > "$SESS/rollout-2026-06-19T06-00-00-gggg.jsonl"
-USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "string/null --update" "$?" 0
+reset; auth_chatgpt
+STUB_CURL=ok STUB_P5='"abc"' STUB_P7=null USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "string/null --update" "$?" 0
 ckhas "string/null → 0%" "0%"
 
 echo "T7: sentinels in a NON-default window → scanned + renamed via --window"
-reset; codex_stub; snap 55 5 > "$SESS/rollout-2026-06-19T06-00-00-hhhh.jsonl"
-STUB_MULTIWIN=1 USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "multi-window --update" "$?" 0
+reset; auth_chatgpt
+STUB_CURL=ok STUB_P5=55 STUB_P7=5 STUB_MULTIWIN=1 USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "multi-window --update" "$?" 0
 ckhas "cx5h renamed in other window" "cx5h "
 ckhas "cx5h pct via --window" "55%"
 
