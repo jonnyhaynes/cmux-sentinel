@@ -18,21 +18,55 @@ trap 'rm -rf "$ROOT"' EXIT
 mkdir -p "$ROOT/bin" "$ROOT/home/.config/cmux"
 ln -s "$JQ" "$ROOT/bin/jq"
 
-# Fake cmux: ping ok; workspace create logs the --name; workspace list returns the
-# four sentinels when STUB_EXISTING is set (else none); the set_auto_title probe
+# Fake cmux: ping ok; workspace create logs the --name; the set_auto_title probe
 # reports global auto-naming OFF unless STUB_AUTONAMING=on.
+#
+# `workspace list` is STATEFUL so the shortcut-layout pass can be tested for real:
+# it renders $SETUPTEST/.wslist (one "ref<TAB>title" line per workspace, in order)
+# as JSON with a computed .index, and `reorder-workspace` actually moves a line.
+# STUB_EXISTING seeds a list with the sentinels interleaved among real workspaces
+# — i.e. exactly the state in which meters steal ⌘ keys.
 cat > "$ROOT/bin/cmux" <<'FAKE'
 #!/bin/bash
 LOG="$SETUPTEST/.created"
+STATE="$SETUPTEST/.ws.json"
+
+# State is a JSON file ($SETUPTEST/.ws.json); `workspace list` just cats it and
+# `reorder-workspace` moves one element with jq. Keeping JSON handling in jq (not
+# a bash printf loop) keeps this stub small and predictable.
+render() { cat "$STATE"; }
+
+reorder() { # $1 = ref, $2 = final index — drop the element, re-insert at $2, renumber .index
+  local tmp="$STATE.tmp"
+  jq -c --arg r "$1" --argjson i "$2" '
+    .workspaces as $w
+    | ($w | map(.ref) | index($r)) as $pos
+    | if $pos == null then $w
+      else ($w | del(.[$pos])) as $rest
+        | $rest[0:$i] + [$w[$pos]] + $rest[$i:]
+      end
+    | {workspaces: [to_entries[] | .value + {index: .key}]}
+  ' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+}
+
 case "$1" in
   ping) exit 0 ;;
   list-windows) printf '[{"id":"win-a"}]\n'; exit 0 ;;
+  reorder-workspace)
+    shift; ref=""; idx=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --workspace) ref="$2"; shift 2 ;;
+        --index) idx="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ -f "$STATE" ] || exit 1
+    reorder "$ref" "$idx" || exit 1
+    echo "OK workspace=$ref index=$idx"; exit 0 ;;
   workspace)
     case "$2" in
-      list)
-        if [ -n "${STUB_EXISTING:-}" ]; then
-          printf '{"workspaces":[{"title":"5h x","ref":"w1"},{"title":"7d x","ref":"w2"},{"title":"cx5h x","ref":"w3"},{"title":"cx7d x","ref":"w4"}]}\n'
-        else printf '{"workspaces":[]}\n'; fi ;;
+      list) if [ -f "$STATE" ]; then render; else printf '{"workspaces":[]}\n'; fi ;;
       create)
         shift 2; name=""
         while [ $# -gt 0 ]; do case "$1" in --name) name="$2"; shift 2 ;; *) shift ;; esac; done
@@ -54,6 +88,7 @@ chmod +x "$ROOT/bin/cmux"
 export SETUPTEST="$ROOT" HOME="$ROOT/home" TMPDIR="$ROOT"
 PATH="$ROOT/bin:/usr/bin:/bin"
 CREATED="$ROOT/.created"
+WSLIST="$ROOT/.ws.json"
 
 pass=0; fail=0
 ok()  { pass=$((pass + 1)); printf '  ✓ %s\n' "$1"; }
@@ -63,7 +98,10 @@ ckn() { local m="$1"; shift; if "$@"; then bad "$m"; else ok "$m"; fi; }   # cmd
 ckhas() { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" ;; esac; }           # substring
 created() { grep -qx -- "$1" "$CREATED" 2>/dev/null; }       # was label $1 created?
 ncreated() { [ -f "$CREATED" ] && wc -l < "$CREATED" | tr -d ' ' || echo 0; }
-reset() { rm -f "$CREATED"; }
+reset() { rm -f "$CREATED" "$WSLIST"; }
+seed() { local i=0 t; : > "$WSLIST.raw"; for t in "$@"; do printf '%s\n' "$t" >> "$WSLIST.raw"; done
+         jq -R -s -c 'split("\n") | map(select(length>0)) | {workspaces: [to_entries[] | {index: .key, ref: ("w" + (.key+1|tostring)), title: .value}]}' "$WSLIST.raw" > "$WSLIST"; rm -f "$WSLIST.raw"; }
+titles() { jq -r '[.workspaces[].title] | join("|")' "$WSLIST" 2>/dev/null; }   # current order
 
 echo "T1: providers=claude → creates 5h + 7d only"
 reset
@@ -80,16 +118,73 @@ for l in 5h 7d cx5h cx7d; do ck "created $l" created "$l"; done
 
 echo "T3: idempotent — existing sentinels are left alone"
 reset
-out=$(STUB_EXISTING=1 USAGE_PROVIDERS="claude codex" bash "$SETUP" 2>&1); rc=$?
+seed "5h x" "7d x" "cx5h x" "cx7d x"
+out=$(USAGE_PROVIDERS="claude codex" bash "$SETUP" 2>&1); rc=$?
 ck "exit 0" [ "$rc" = 0 ]
 ck "created nothing (all exist)" [ "$(ncreated)" = 0 ]
 ckhas "reported existing" "$out" "already exists"
 
 echo "T4: auto-naming guard reports global state"
+reset
 out=$(USAGE_PROVIDERS="claude" bash "$SETUP" 2>&1)
 ckhas "OFF → reports safe" "$out" "auto-naming is OFF"
 out=$(STUB_AUTONAMING=on USAGE_PROVIDERS="claude" bash "$SETUP" 2>&1)
 ckhas "ON → warns" "$out" "may be ON"
+
+# ── shortcut layout ───────────────────────────────────────────────────────────
+# Invariant: sentinels end up in the keyless band (indices 8…count-2) and the LAST
+# workspace is a real one — so ⌘1…⌘8 (indices 0…7) and ⌘9 (count-1) all hit real
+# workspaces. Meters interleaved among reals is the state that steals keys.
+echo "T5: layout parks meters below the list and anchors ⌘9 on the last real"
+reset
+seed a b c d e "cx7d ▎ 3%" "cx5h n/a" f g h i j k "5h ███ 41%" l "7d ██ 58%"
+out=$(USAGE_PROVIDERS="claude codex" bash "$SETUP" 2>&1)
+ck "created nothing (all exist)" [ "$(ncreated)" = 0 ]
+ckhas "reported parking" "$out" "parked"
+ckhas "reported ⌘9 anchor" "$out" "anchored"
+at() { jq -r --argjson i "$1" '.workspaces[$i].title // ""' "$WSLIST"; }   # title at index
+ck "real workspaces keep their relative order" \
+   [ "$(jq -r '[.workspaces[].title | select(test("^(5h|7d|cx5h|cx7d)( |$)") | not)] | join("|")' "$WSLIST")" \
+     = "a|b|c|d|e|f|g|h|i|j|k|l" ]
+# ⌘1…⌘8 = indices 0-7
+for i in 0 1 2 3 4 5 6 7; do
+  t=$(at "$i")
+  case "$t" in 5h*|7d*|cx5h*|cx7d*) bad "Cmd+$((i + 1)) hits a meter ($t)" ;; *) ok "Cmd+$((i + 1)) → real ($t)" ;; esac
+done
+# ⌘9 = last workspace
+last=$(jq -r '.workspaces[-1].title' "$WSLIST")
+case "$last" in 5h*|7d*|cx5h*|cx7d*) bad "Cmd+9 hits a meter ($last)" ;; *) ok "Cmd+9 → real ($last)" ;; esac
+ck "all four meters sit in the keyless band (indices 8…count-2)" \
+   [ "$(jq -r '[.workspaces[8:-1][] | select(.title | test("^(5h|7d|cx5h|cx7d)( |$)"))] | length' "$WSLIST")" = 4 ]
+
+echo "T6: layout is idempotent — a second run converges to the same order"
+before=$(titles)
+USAGE_PROVIDERS="claude codex" bash "$SETUP" >/dev/null 2>&1
+ck "order unchanged on re-run" [ "$(titles)" = "$before" ]
+
+echo "T7: --no-layout / SENTINEL_LAYOUT=0 leave the order alone"
+reset
+seed a "5h ███" b "7d ██" c
+before=$(titles)
+out=$(USAGE_PROVIDERS="claude" bash "$SETUP" --no-layout 2>&1)
+ck "--no-layout: order untouched" [ "$(titles)" = "$before" ]
+case "$out" in *parked*) bad "--no-layout: says nothing about parking" ;; *) ok "--no-layout: says nothing about parking" ;; esac
+SENTINEL_LAYOUT=0 USAGE_PROVIDERS="claude" bash "$SETUP" >/dev/null 2>&1
+ck "SENTINEL_LAYOUT=0: order untouched" [ "$(titles)" = "$before" ]
+
+echo "T8: degenerate lists don't scramble anything"
+reset
+seed "5h ███" "7d ██"                       # sentinels only, no real workspace
+out=$(USAGE_PROVIDERS="claude" bash "$SETUP" 2>&1); rc=$?
+ck "exit 0 with no reals" [ "$rc" = 0 ]
+ckhas "reports it can't anchor ⌘9" "$out" "too few workspaces"
+reset
+seed a "5h ███" "7d ██"                     # exactly one real — don't bury it
+out=$(USAGE_PROVIDERS="claude" bash "$SETUP" 2>&1)
+ck "single real workspace stays at index 0 (keeps ⌘1)" [ "$(jq -r '.workspaces[0].title' "$WSLIST")" = "a" ]
+reset
+out=$(USAGE_PROVIDERS="claude codex" bash "$SETUP" 2>&1)   # no workspaces at all
+ckhas "empty list → nothing to park" "$out" "no sentinels to park"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

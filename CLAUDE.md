@@ -85,9 +85,12 @@ break everything. Confirmed traps:
   the fix is ORDER, which is free because sentinel index doesn't affect what renders (the meter
   panel sorts by label; the list filters meters out). **Layout invariant: sentinels live in the
   keyless band (indices 8…count-2) and the LAST workspace is a real one** — that's 9/9 keys on real
-  workspaces. Sentinels at the very bottom costs ⌘9; at the top costs ⌘1–⌘4. Applied by hand via
-  `cmux reorder-workspace` (NOT yet enforced — `cmux-sentinel-setup.sh` appends at the end, so a
-  fresh bootstrap costs ⌘9). See `.claude/research/2026-07-15-workspace-shortcut-digits.md`.
+  workspaces. Sentinels at the very bottom costs ⌘9; at the top costs ⌘1–⌘4. Enforced by the layout
+  pass in `bin/cmux-sentinel-setup.sh` (re-run it anytime; `--no-layout` / `SENTINEL_LAYOUT=0` opts
+  out). It only pushes meters down and re-parks the workspace that was ALREADY last, so relative
+  order of real workspaces is preserved and nothing visible moves. Deliberately NOT in the pollers —
+  re-asserting order every 5min would fight manual drag-reordering.
+  See `.claude/research/2026-07-15-workspace-shortcut-digits.md`.
 - **Greedy modifiers that wreck row height:** `Divider().background("#hex")`,
   `.frame(maxHeight: .infinity)`, `.overlay { Rectangle().frame(height:1) }`. Use plain `Divider()` +
   a single `.padding(n)`. `.contentShape(Rectangle())` is a no-op. Custom fonts aren't honored —
@@ -111,11 +114,12 @@ cmux sidebar validate workspaces && cmux sidebar reload   # validate only PARSES
 ./bin/cmux-codex-usage.sh --print      # Codex: live utilization from ChatGPT wham/usage
 ./bin/cmux-codex-usage.sh --raw        # raw wham/usage JSON (token NOT included)
 ./bin/cmux-codex-usage.sh --update     # renames cx5h/cx7d (needs USAGE_PROVIDERS to list codex)
+./bin/cmux-sentinel-setup.sh           # create sentinels + park them out of ⌘1…⌘9 (--no-layout skips)
 ./bin/cmux-group-sync.sh --list        # workspace-GROUP names: which anchors are out of sync (read-only)
 ./bin/cmux-group-sync.sh --update      # rename group anchors to the group name (needs GROUP_NAME_SYNC=1)
 
 # offline tests (stub cmux/security/curl/$HOME — run in CI too)
-make test   # bridge-state(36) poller-gate(21) codex-poller(33) install-hooks(21) sentinel-setup(14)
+make test   # bridge-state(36) poller-gate(21) codex-poller(33) install-hooks(21) sentinel-setup(36)
             # group-sync(20) zed-bridge(24) open-in-zed(14) usage-tui(16)
 ```
 
@@ -125,7 +129,7 @@ make test   # bridge-state(36) poller-gate(21) codex-poller(33) install-hooks(21
 sidebars/workspaces.swift  the sidebar. isClaudeMeter()/isCodexMeter() = title-label `.hasPrefix` per provider; isUsageMeter() = any.
 bin/cmux-claude-usage.sh    Claude usage poller. make_bar / sev_dot / mark_offline / bucket_field / to_pct / resolve_ref(+_paint, multi-window).
 bin/cmux-codex-usage.sh     Codex usage poller (ChatGPT wham/usage endpoint; token from ~/.codex/auth.json). read_token / fetch_usage / make_bar / sev_dot / mark_offline / to_pct / resolve_ref(+_paint).
-bin/cmux-sentinel-setup.sh  idempotent sentinel creation (per USAGE_PROVIDERS) + auto-naming guard probe.
+bin/cmux-sentinel-setup.sh  idempotent sentinel creation (per USAGE_PROVIDERS) + auto-naming guard probe + ⌘N shortcut layout (layout/sentinel_window, --no-layout).
 bin/cmux-group-sync.sh      workspace-GROUP name → anchor-title sync (opt-in GROUP_NAME_SYNC). split-marker / multi-window / --list|--raw|--update.
 hooks/cmux-bridge.sh        Claude Code → cmux agent-state bridge (⚡ working / ⏳ compacting / ❓ waiting-on-you rows).
 hooks/zed-bridge.sh         OPT-IN (ZED_SENTINEL=1) cmux-free Zed bridge: same ⚡/⏳/❓ markers to OSC terminal-title + JSON sink.
