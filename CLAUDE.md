@@ -69,6 +69,25 @@ break everything. Confirmed traps:
   as the meters: `bin/cmux-group-sync.sh` (opt-in `GROUP_NAME_SYNC=1`) renames each anchor's title to
   `group.name` via the **title channel** (preserving any ⚡/⏳ marker, writing only on change). Don't
   try to read group data in the sidebar — it isn't there.
+- **No modifier-key state reaches the interpreter — ⌘-hold hints are impossible.** The live
+  bindings are only `workspaces` / `tabs` / `workspaceCount` / `selectedTitle` / `selectedId` /
+  `unreadTotal` / `clock`; there's no keyboard/modifier binding (and no `@State`, no
+  `.keyboardShortcut`). cmux's NATIVE sidebar does draw ⌘-hold digit badges
+  (`modifierKeyMonitor.isModifierPressed`), but that's internal to it. Even given a binding, the
+  ~1s re-eval would lag a held key. Needs an upstream feature — don't try to fake it.
+- **The ⌘N gutter digit keys on `w.index`, mirroring cmux's `WorkspaceShortcutMapper`.** Two traps a
+  naive 1..N counter gets wrong: **⌘9 is NOT the 9th** — it always selects the LAST workspace
+  (`count-1`), so indices 8…count-2 have no key at all; and the digit indexes cmux's FULL tab list,
+  which **includes the sentinels** (cmux has no "sentinel" concept — that's only this file's
+  predicates). So the meters really do eat ⌘ slots and the visible rows show honest gaps
+  (verified 2026-07-15 by a real ⌘1…⌘9 sweep: ⌘6→`cx7d`, ⌘7→`cx5h`, ⌘9→`7d`). There's no way to
+  make a sentinel weightless — `TabManager.tabs` is the raw array, no hidden/archived concept — so
+  the fix is ORDER, which is free because sentinel index doesn't affect what renders (the meter
+  panel sorts by label; the list filters meters out). **Layout invariant: sentinels live in the
+  keyless band (indices 8…count-2) and the LAST workspace is a real one** — that's 9/9 keys on real
+  workspaces. Sentinels at the very bottom costs ⌘9; at the top costs ⌘1–⌘4. Applied by hand via
+  `cmux reorder-workspace` (NOT yet enforced — `cmux-sentinel-setup.sh` appends at the end, so a
+  fresh bootstrap costs ⌘9). See `.claude/research/2026-07-15-workspace-shortcut-digits.md`.
 - **Greedy modifiers that wreck row height:** `Divider().background("#hex")`,
   `.frame(maxHeight: .infinity)`, `.overlay { Rectangle().frame(height:1) }`. Use plain `Divider()` +
   a single `.padding(n)`. `.contentShape(Rectangle())` is a no-op. Custom fonts aren't honored —

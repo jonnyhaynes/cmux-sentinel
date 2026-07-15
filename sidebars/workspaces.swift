@@ -213,6 +213,29 @@ func meterRow(_ w) -> some View {
   }
 }
 
+// ── ⌘N shortcut digit ─────────────────────────────────────────────
+// The gray gutter digit is the workspace's REAL ⌘N key, mirrored from cmux's own
+// WorkspaceShortcutMapper (Sources/App/TerminalDirectoryOpenSupport.swift) so the
+// badge can never drift from the keystroke. Two things that logic dictates and a
+// naive 1..N counter would get WRONG:
+//   1. ⌘9 is NOT "the 9th" — it always targets the LAST workspace, so the digit
+//      hangs off the end of the list, not off position 9.
+//   2. The number indexes cmux's FULL workspace list (`manager.tabs`), which
+//      includes the usage sentinels. cmux has no notion of a "sentinel" — that
+//      concept lives only in this file's predicates — so the meters silently eat
+//      ⌘ slots and the visible rows have gaps. Numbering the visible rows 1..N
+//      instead would be a lie that makes ⌘N worse, so we key on w.index.
+// 0 = this row has no ⌘ key at all (indices 8…count-2 are unreachable).
+func shortcutDigit(_ w) -> Int {
+  if w.index < 8 { return w.index + 1 }             // ⌘1…⌘8 = fixed zero-based index
+  if w.index == workspaceCount - 1 { return 9 }     // ⌘9 = last workspace, whatever its index
+  return 0
+}
+func shortcutLabel(_ w) -> String {
+  if shortcutDigit(w) > 0 { return "\(shortcutDigit(w))" }
+  return ""
+}
+
 // ── row visuals ───────────────────────────────────────────────────
 func accentColor(_ w) -> String {
   if isCompacting(w) { return "#DFBFFF" }
@@ -245,10 +268,16 @@ func rowFillOpacity(_ w) -> Double {
 func row(_ w) -> some View {
   VStack(spacing: 0) {
     Button(action: { cmux("workspace.select", workspace_id: w.id) }) {
-      HStack(alignment: .top, spacing: 10) {
+      HStack(alignment: .top, spacing: 8) {
         Capsule().frame(width: 3, height: 26)
           .foregroundColor(accentColor(w))
           .opacity(accentOpacity(w))
+        // ⌘N gutter. Fixed width so titles stay aligned on rows that have no key
+        // (shortcutLabel == ""), and dim on purpose — it's a lookup aid, not state.
+        Text(shortcutLabel(w))
+          .font(.system(size: 11, design: .monospaced))
+          .foregroundColor(w.selected ? "#8A9199" : "#6E7787")
+          .frame(width: 9)
         VStack(alignment: .leading, spacing: 2) {
           Text(displayTitle(w))
             .font(.system(size: 14, design: .monospaced))
