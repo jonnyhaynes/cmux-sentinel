@@ -140,6 +140,58 @@ if [ "$codex_on" = 1 ] && have cmux && have jq; then
   done
 fi
 
+# ── ⌘N shortcut layout ────────────────────────────────────────────────────────
+# Mirrors cmux's WorkspaceShortcutMapper (Sources/App/TerminalDirectoryOpenSupport.swift;
+# re-verified unchanged on 0.64.19): ⌘1…⌘8 select indices 0…7, and ⌘9 ALWAYS selects
+# the LAST workspace (count-1) — so indices 8…count-2 are the "keyless band".
+#
+# A sentinel is an ordinary workspace to cmux ("sentinel" only exists in our sidebar's
+# predicates), so a meter on a keyed index silently EATS that ⌘ key.
+# bin/cmux-sentinel-setup.sh parks them in the band, but that's a one-shot pass: CLOSING
+# workspaces above a meter shifts it up, and the invariant decays with no symptom beyond
+# a ⌘ key doing something unexpected. Hence a check — this is exactly the class of silent
+# failure the doctor exists for. Read-only by design: we report, setup fixes. (Deliberately
+# NOT auto-repaired in the pollers — re-asserting order every 5min would fight manual
+# drag-reordering; see CLAUDE.md.)
+echo "• ⌘N shortcut layout"
+if have cmux && have jq; then
+  lay="$(cmux workspace list --json 2>/dev/null)"
+  lay_labels="$(printf '%s\n' "$lbl5" "$lbl7" "$lblcx5" "$lblcx7" | jq -R . | jq -s .)"
+  # Digits eaten by a meter, computed straight off .index — never off the ref, which is
+  # an insertion-order handle and does NOT equal display position (it only coincides
+  # right after a restart).
+  eaten="$(printf '%s' "$lay" | jq -r --argjson ls "$lay_labels" '
+      (.workspaces | length) as $n
+      | [ .workspaces[]
+          | select(.title as $t | $ls | any(. as $l | $t == $l or ($t | startswith($l + " "))))
+          | .index
+          | if . == $n - 1 then "⌘9" elif . <= 7 then "⌘\(. + 1)" else empty end ]
+      | unique | join(", ")' 2>/dev/null)"
+  n_ws="$(printf '%s' "$lay" | jq -r '.workspaces | length' 2>/dev/null)"
+  n_meters="$(printf '%s' "$lay" | jq -r --argjson ls "$lay_labels" '
+      [ .workspaces[] | select(.title as $t | $ls | any(. as $l | $t == $l or ($t | startswith($l + " ")))) ] | length' 2>/dev/null)"
+
+  if [ -z "${lay:-}" ] || [ -z "${n_ws:-}" ]; then
+    warn "couldn't read the workspace list — skipping layout check"
+  elif [ "${n_meters:-0}" = 0 ]; then
+    note "no meters in this window — nothing to park"
+  elif [ -n "$eaten" ]; then
+    warn "meters are eating $eaten — re-park them: $HERE/cmux-sentinel-setup.sh"
+  else
+    # Headroom: a meter needs 8 real workspaces above it to clear ⌘1…⌘8, so the number
+    # of reals above the first meter minus 8 is how many closes we can absorb.
+    first_meter="$(printf '%s' "$lay" | jq -r --argjson ls "$lay_labels" '
+        [ .workspaces[] | select(.title as $t | $ls | any(. as $l | $t == $l or ($t | startswith($l + " ")))) | .index ] | min' 2>/dev/null)"
+    slack=$(( first_meter - 8 ))
+    if [ "$slack" -le 1 ]; then
+      ok "all 9 ⌘ keys on real workspaces (meters parked in the keyless band)"
+      note "headroom is thin — closing $((slack + 1)) more workspace(s) above the meters will eat ⌘8; re-run cmux-sentinel-setup.sh after a cleanup"
+    else
+      ok "all 9 ⌘ keys on real workspaces (meters parked in the keyless band)"
+    fi
+  fi
+else warn "cmux or jq unavailable — can't check the ⌘N layout"; fi
+
 # Sidebar DATA snapshot (cmux 0.64.16+ exposes extension.sidebar.snapshot). This is
 # the closest read-only view of what cmux actually projects to the sidebar — handy
 # when a meter looks wrong. NB: the snapshot is the DATA MODEL, not the rendered

@@ -90,7 +90,15 @@ break everything. Confirmed traps:
   out). It only pushes meters down and re-parks the workspace that was ALREADY last, so relative
   order of real workspaces is preserved and nothing visible moves. Deliberately NOT in the pollers —
   re-asserting order every 5min would fight manual drag-reordering.
-  See `.claude/research/2026-07-15-workspace-shortcut-digits.md`.
+  **That pass is one-shot, so the invariant DECAYS: closing a workspace above a meter shifts the
+  meter up, and once fewer than 8 reals sit above it, it eats ⌘8** — silently, since the only symptom
+  is a ⌘ key doing something odd. So `bin/cmux-sentinel-doctor.sh` reports which digits (if any) the
+  meters are eating and warns when headroom is down to one close; the fix is always "re-run setup".
+  Read-only, for the same reason it's not in the pollers. The mapper was re-verified UNCHANGED on
+  0.64.19 (0.64.18's "Fix workspace number shortcut rebinding" touched settings rebinding, not the
+  index math) — the source is fetchable, `cmux docs shortcuts` names the raw URLs.
+  See `.claude/research/2026-07-15-workspace-shortcut-digits.md` and
+  `.claude/research/2026-07-16-cmux-0.64.19-pre-restart-check.md`.
 - **Greedy modifiers that wreck row height:** `Divider().background("#hex")`,
   `.frame(maxHeight: .infinity)`, `.overlay { Rectangle().frame(height:1) }`. Use plain `Divider()` +
   a single `.padding(n)`. `.contentShape(Rectangle())` is a no-op. Custom fonts aren't honored —
@@ -130,6 +138,7 @@ sidebars/workspaces.swift  the sidebar. isClaudeMeter()/isCodexMeter() = title-l
 bin/cmux-claude-usage.sh    Claude usage poller. make_bar / sev_dot / mark_offline / bucket_field / to_pct / resolve_ref(+_paint, multi-window).
 bin/cmux-codex-usage.sh     Codex usage poller (ChatGPT wham/usage endpoint; token from ~/.codex/auth.json). read_token / fetch_usage / make_bar / sev_dot / mark_offline / to_pct / resolve_ref(+_paint).
 bin/cmux-sentinel-setup.sh  idempotent sentinel creation (per USAGE_PROVIDERS) + auto-naming guard probe + ⌘N shortcut layout (layout/sentinel_window, --no-layout).
+bin/cmux-sentinel-doctor.sh READ-ONLY wiring report: cmux/sidebar/bridge/auto-refresh, installed × enabled × sentinel per provider, ⌘N layout drift, snapshot data.
 bin/cmux-group-sync.sh      workspace-GROUP name → anchor-title sync (opt-in GROUP_NAME_SYNC). split-marker / multi-window / --list|--raw|--update.
 hooks/cmux-bridge.sh        Claude Code → cmux agent-state bridge (⚡ working / ⏳ compacting / ❓ waiting-on-you rows).
 hooks/zed-bridge.sh         OPT-IN (ZED_SENTINEL=1) cmux-free Zed bridge: same ⚡/⏳/❓ markers to OSC terminal-title + JSON sink.
