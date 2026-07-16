@@ -131,6 +131,20 @@ setgrp w1 '{"groups":[{"name":null,"anchor_workspace_ref":"workspace:9"}]}'
 GROUP_NAME_SYNC=1 bash "$POLLER" --update; ckcode "unnamed --update" "$?" 0
 ckno "unnamed group skipped"
 
+echo "T6b: anchorless group (empty group, cmux 0.64.18) → skipped, never renames ref 'null'"
+reset; setwin '[{"id":"w1"}]'
+setws  w1 '{"workspaces":[{"title":"Group 7","ref":"workspace:9"}]}'
+setgrp w1 '{"groups":[{"name":"Empty Group","anchor_workspace_ref":null}]}'
+GROUP_NAME_SYNC=1 bash "$POLLER" --update; ckcode "anchorless --update" "$?" 0
+ckno "anchorless group skipped"
+
+echo "T6c: anchor key ABSENT entirely → skipped (jq renders missing as null too)"
+reset; setwin '[{"id":"w1"}]'
+setws  w1 '{"workspaces":[{"title":"Group 7","ref":"workspace:9"}]}'
+setgrp w1 '{"groups":[{"name":"Keyless Group"}]}'
+GROUP_NAME_SYNC=1 bash "$POLLER" --update; ckcode "anchor-absent --update" "$?" 0
+ckno "anchor-absent group skipped"
+
 echo "T7: group lives in a NON-default window → renamed via --window"
 reset; setwin '[{"id":"w1"},{"id":"w2"}]'
 setws  w1 '{"workspaces":[]}'; setgrp w1 '{"groups":[]}'

@@ -120,7 +120,7 @@ cmux sidebar validate workspaces && cmux sidebar reload   # validate only PARSES
 
 # offline tests (stub cmux/security/curl/$HOME — run in CI too)
 make test   # bridge-state(36) poller-gate(21) codex-poller(33) install-hooks(21) sentinel-setup(36)
-            # group-sync(20) zed-bridge(24) open-in-zed(14) usage-tui(16)
+            # group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(16)
 ```
 
 ## Architecture / where things live
