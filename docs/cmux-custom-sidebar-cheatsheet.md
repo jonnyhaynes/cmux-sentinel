@@ -3,32 +3,40 @@
 A one-screen field guide to the traps that cost real hours when building a cmux
 [custom sidebar](https://cmux.com/docs/custom-sidebars). The sidebar runs a
 **subset** of an interpreted SwiftUI-style language; the official docs tell you the
-API, this tells you what bites. Everything below is verified on **cmux 0.64.16**
+API, this tells you what bites. Everything below is verified through **cmux 0.64.20**
 (re-check after upgrades — the interpreter and data model move fast).
 
 - Official authoring reference: `cmux docs sidebars` /
   <https://raw.githubusercontent.com/manaflow-ai/cmux/main/docs/custom-sidebars.md>
 - Roadmap (lifts most of these limits): `docs/data-driven-sidebar-plan.md` upstream.
 
-## Validation lies
+## Validation is not rendering
 
-- **`cmux sidebar validate <name>` only PARSES.** It passes on files that render
-  **completely blank** at runtime, and the interpreter swallows the error silently
-  (no log). A file that "validates" can still break everything — always eyeball it.
+- **`cmux sidebar validate <name>` parses and interprets against a fixed synthetic data context.**
+  It does **not** mount `RenderNodeView`, run SwiftUI/AppKit layout, exercise every live-data branch,
+  or prove visible pixels. A file can validate and still render blank/collapsed with real data.
+- **There is no public rendered-tree, accessibility-tree, or pixel snapshot RPC.**
+  `cmux sidebar open <name>` is the strongest live smoke path; `select`/`reload` exercise the same
+  mounted renderer. Visual inspection remains necessary. In remote-renderer mode,
+  `CMUX_RENDER_WORKER_DEBUG=1` adds worker/layout telemetry but not source-level interpreter errors.
+- The upstream implementation audit and rationale for keeping visual inspection instead of a brittle
+  screenshot/OCR CI gate are in [`sidebar-render-validation.md`](sidebar-render-validation.md).
 
 ## Data channels (what actually reaches the sidebar)
 
-- **The TITLE is the only dependable per-workspace channel.** `progress`, `color`,
-  and `description` are unreliable in custom-sidebar data today — active-workspace-only
-  at best, often not present at all for idle workspaces. So anything you want to show
-  on an idle/sentinel row (bars, state, status) has to ride the **title** string.
-  (cmux's data-driven-sidebar plan intends to fix this — re-probe after each upgrade.)
-- **No value-accurate native bar.** `ProgressView(value:)` / `Gauge(value:)` need a
-  numeric `progress` you don't reliably have, so meters are Unicode block text bars
-  (`▏▎▍▌▋▊▉█`) and color is a colored emoji in the title (🟡/🔴).
-- **`cmux sidebar-state` DIVERGES from what the sidebar sees** (it reads the canonical
-  store). Never use it to predict the sidebar — verify with an in-sidebar `Text(...)`
-  probe instead.
+- **`progress`, `description`, and `color` DO reach the interpreter, but are null until
+  explicitly set.** A known-set render probe is the only valid test; an empty value on an untouched
+  workspace proves nothing. `progress.value` + `progress.label` can drive a value-accurate
+  `ProgressView(value:)`; `color` and `description` are also bindable.
+- **The title is still the strongest identity/fallback channel.** It persists, can be re-resolved
+  after workspace refs rotate, and exists before the next poll restores `progress`. Keep stable
+  title prefixes for sentinel identity and a Unicode fallback for bootstrap/offline windows.
+- **`cmux set-status` does NOT reach custom sidebars.** It renders native-sidebar pills only; the
+  binding contract has no status field. Agent-state bridges therefore still need static title
+  markers (or another interpreter-visible field).
+- **`cmux sidebar-state` and `extension.sidebar.snapshot` are data snapshots, not render probes.**
+  The snapshot can omit `progress` immediately after a successful `set-progress`. Verify disputed
+  fields with an in-sidebar `Text(...)` against a workspace where the field is known-set.
 
 ## Identity: no stable workspace id
 
@@ -79,5 +87,5 @@ API, this tells you what bites. Everything below is verified on **cmux 0.64.16**
 ---
 
 Worked example: this repo's [`sidebars/workspaces.swift`](../sidebars/workspaces.swift)
-puts all of the above into practice (title-as-data-channel usage meters + hook-driven
-agent-state markers).
+puts all of the above into practice (native progress meters with title-anchor fallbacks plus
+hook-driven static agent-state markers).

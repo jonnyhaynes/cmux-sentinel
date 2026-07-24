@@ -72,6 +72,12 @@ for ev in $EVENTS; do
 done
 if [ -z "$dups" ]; then ok "every event has exactly one cmux-bridge after re-run"; else bad "duplicate registrations:$dups"; fi
 
+echo "T3b: plain re-run refreshes an already-registered Claude bridge"
+printf '#!/bin/bash\n# stale\n' > "$SBX/.claude/hooks/cmux-bridge.sh"
+( cd "$ROOT" && HOME="$SBX" bash "$INSTALL" ) >/dev/null 2>&1
+if cmp -s "$HERE/../hooks/cmux-bridge.sh" "$SBX/.claude/hooks/cmux-bridge.sh"; then ok "plain re-run refreshed Claude bridge"; else bad "plain re-run left Claude bridge stale"; fi
+if [ "$(bridgecount SessionStart)" = 1 ]; then ok "existing Claude registration remains idempotent"; else bad "cmux-bridge SessionStart count = $(bridgecount SessionStart)"; fi
+
 echo "T4: jq unavailable → graceful no-op, settings.json untouched"
 # Build a bin with symlinks to ONLY the tools install.sh needs — deliberately no
 # jq — and run with PATH pointed there. (Trimming PATH to /usr/bin:/bin isn't
@@ -114,14 +120,14 @@ for f in .claude/hooks/zed-bridge.sh bin/cmux-open-in-zed.sh bin/zed-usage-tui.s
   if [ -x "$SBX/$f" ]; then ok "installed $f"; else bad "missing $f"; fi
 done
 
-echo "T6: WITH_ZED=1 (env form) re-run is idempotent; cmux path unaffected"
+echo "T6: WITH_ZED=1 re-run is idempotent and does not infer Claude opt-in"
 ( cd "$ROOT" && WITH_ZED=1 HOME="$SBX" bash "$INSTALL" ) >/dev/null 2>&1
 zdups=""
 for ev in $ZED_EVENTS; do
   [ "$(zedcount "$ev")" = 1 ] || zdups="$zdups $ev=$(zedcount "$ev")"
 done
 if [ -z "$zdups" ]; then ok "every zed event has exactly one zed-bridge after re-run"; else bad "duplicate zed registrations:$zdups"; fi
-if [ "$(bridgecount SessionStart)" = 1 ]; then ok "cmux-bridge path unaffected by --with-zed"; else bad "cmux-bridge SessionStart count = $(bridgecount SessionStart)"; fi
+if [ "$(bridgecount SessionStart)" = 0 ]; then ok "--with-zed does not infer Claude opt-in from a leftover bridge file"; else bad "cmux-bridge SessionStart count = $(bridgecount SessionStart) (want 0)"; fi
 
 echo "T7: a default install (no flags/env) stays Zed-free; unknown flag rejected"
 SBX2="$ROOT/home2"; mkdir -p "$SBX2/.claude"
@@ -133,6 +139,32 @@ S2="$SBX2/.claude/settings.json"
 if [ ! -f "$S2" ] || ! grep -q -e cmux-bridge -e zed-bridge "$S2" 2>/dev/null; then ok "default settings carries no bridge hooks"; else bad "default install wrote bridge hooks"; fi
 ( cd "$ROOT" && HOME="$SBX2" bash "$INSTALL" --bogus ) >/dev/null 2>&1; rc=$?
 if [ "$rc" = 2 ]; then ok "unknown flag → exit 2"; else bad "unknown flag exit $rc (want 2)"; fi
+
+echo "T8: Amp-only install uses a neutral bridge and never opts into Claude hooks"
+SBX3="$ROOT/home3"; mkdir -p "$SBX3/.claude"
+( cd "$ROOT" && HOME="$SBX3" bash "$INSTALL" --with-amp ) >/dev/null 2>&1; rc=$?
+if [ "$rc" = 0 ]; then ok "install.sh --with-amp exited 0"; else bad "install.sh --with-amp exited $rc"; fi
+if [ -x "$SBX3/.config/cmux-sentinel/cmux-bridge.sh" ]; then ok "Amp shared bridge installed at neutral path"; else bad "neutral Amp shared bridge missing"; fi
+if [ -f "$SBX3/.config/amp/plugins/cmux-sentinel-amp.ts" ]; then ok "Amp plugin installed"; else bad "Amp plugin missing"; fi
+if [ ! -e "$SBX3/.claude/hooks/cmux-bridge.sh" ]; then ok "Amp-only install creates no Claude bridge"; else bad "Amp-only install created Claude bridge"; fi
+if [ ! -f "$SBX3/.claude/settings.json" ] || ! grep -q cmux-bridge "$SBX3/.claude/settings.json" 2>/dev/null; then ok "Amp-only install registers no Claude hooks"; else bad "Amp-only install registered Claude hooks"; fi
+
+echo "T9: plain re-run refreshes Amp without turning Claude integration on"
+( cd "$ROOT" && HOME="$SBX3" bash "$INSTALL" ) >/dev/null 2>&1; rc=$?
+if [ "$rc" = 0 ]; then ok "plain re-run after Amp exited 0"; else bad "plain re-run after Amp exited $rc"; fi
+if [ -x "$SBX3/.config/cmux-sentinel/cmux-bridge.sh" ]; then ok "plain re-run keeps neutral Amp bridge"; else bad "plain re-run lost neutral Amp bridge"; fi
+if [ ! -e "$SBX3/.claude/hooks/cmux-bridge.sh" ]; then ok "plain re-run still creates no Claude bridge"; else bad "plain re-run created Claude bridge"; fi
+if [ ! -f "$SBX3/.claude/settings.json" ] || ! grep -q cmux-bridge "$SBX3/.claude/settings.json" 2>/dev/null; then ok "plain re-run still registers no Claude hooks"; else bad "plain re-run registered Claude hooks"; fi
+
+echo "T10: legacy Amp-only install migrates without enabling Claude hooks"
+SBX4="$ROOT/home4"; mkdir -p "$SBX4/.claude/hooks" "$SBX4/.config/amp/plugins"
+printf '#!/bin/bash\n# legacy Amp dependency\n' > "$SBX4/.claude/hooks/cmux-bridge.sh"
+printf '// legacy Amp plugin\n' > "$SBX4/.config/amp/plugins/cmux-sentinel-amp.ts"
+printf '{"hooks":{}}\n' > "$SBX4/.claude/settings.json"
+( cd "$ROOT" && HOME="$SBX4" bash "$INSTALL" ) >/dev/null 2>&1; rc=$?
+if [ "$rc" = 0 ]; then ok "legacy Amp update exited 0"; else bad "legacy Amp update exited $rc"; fi
+if [ -x "$SBX4/.config/cmux-sentinel/cmux-bridge.sh" ]; then ok "legacy Amp dependency migrated to neutral path"; else bad "legacy Amp dependency not migrated"; fi
+if ! grep -q cmux-bridge "$SBX4/.claude/settings.json" 2>/dev/null; then ok "legacy Amp update keeps Claude hooks disabled"; else bad "legacy Amp update enabled Claude hooks"; fi
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

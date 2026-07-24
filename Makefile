@@ -9,12 +9,12 @@
 #   make help    list targets
 
 SHELL   := bash
-SCRIPTS := bin/cmux-claude-usage.sh bin/cmux-codex-usage.sh bin/cmux-sentinel-doctor.sh \
+SCRIPTS := bin/cmux-claude-usage.sh bin/cmux-codex-usage.sh bin/cmux-amp-usage.sh bin/cmux-sentinel-doctor.sh \
            bin/cmux-sentinel-setup.sh bin/cmux-group-sync.sh hooks/cmux-bridge.sh \
            install.sh scripts/check-secrets.sh \
            hooks/zed-bridge.sh bin/cmux-open-in-zed.sh bin/zed-usage-tui.sh \
            tests/bridge-state.sh tests/poller-gate.sh tests/codex-poller.sh \
-           tests/install-hooks.sh tests/sentinel-setup.sh tests/group-sync.sh \
+           tests/install-hooks.sh tests/sentinel-setup.sh tests/sentinel-doctor.sh tests/group-sync.sh \
            tests/zed-bridge.sh tests/open-in-zed.sh tests/usage-tui.sh \
            tests/amp-bridge.sh tests/amp-poller.sh
 MD      := $(wildcard *.md) $(wildcard docs/*.md)
@@ -24,7 +24,7 @@ MD      := $(wildcard *.md) $(wildcard docs/*.md)
 help:
 	@echo "make check   — shellcheck + secrets + markdown + test + sidebar (full local gate)"
 	@echo "make ci      — what CI runs (check minus sidebar; no cmux on the runner)"
-	@echo "make test    — offline state-machine tests: bridge markers + poller gating (stubs cmux)"
+	@echo "make test    — offline bridge, poller, installer, setup, group, and Zed tests (stubs cmux)"
 	@echo "make doctor  — health-check the live setup (read-only)"
 	@echo "make fmt     — reformat shell scripts with shfmt (opt-in, not a gate)"
 
@@ -44,19 +44,24 @@ markdown:
 # state machines: offline, stub cmux/security/curl, run on Linux CI too.
 #   bridge-state  — agent activity markers (⚡/⏳/❓)
 #   poller-gate   — Claude usage-poller gating + malformed-value clamping + bare-label resolve
-#   codex-poller  — Codex usage-poller gating + rollout snapshot parsing + clamping
-#   install-hooks  — install.sh Claude-hook auto-registration (merge / preserve / idempotent / no-jq)
-#   sentinel-setup — cmux-sentinel-setup.sh idempotent sentinel creation + auto-naming guard
+#   codex-poller  — Codex endpoint routing + malformed-duration handling + clamping
+#   amp-poller    — Amp prose parsing + remaining→used inversion + opt-in orb meter
+#   amp-bridge    — Amp lifecycle adapter + shared bridge co-tenancy/error semantics
+#   install-hooks  — integration isolation + hook merge / preserve / idempotent / no-jq
+#   sentinel-setup — provider-window gating + Amp orb opt-in + creation + shortcut layout
+#   sentinel-doctor — multi-window sentinel resolution + shortcut-layout reporting
 #   group-sync     — cmux-group-sync.sh group-name → anchor-title sync (gate / rename / marker / multi-window)
 #   zed-bridge     — zed-bridge.sh Zed OSC-title + JSON status sinks (agent markers, notify gating, toggles)
 #   open-in-zed    — cmux-open-in-zed.sh cmux→Zed handoff (worktree-aware command composition, modes, exec)
 #   usage-tui      — zed-usage-tui.sh terminal-pane meters (bar render, %, dots, provider gating, offline)
+#   amp-bridge's adapter compatibility harness uses Node.js (test-only; preinstalled in CI)
 test:
 	bash tests/bridge-state.sh
 	bash tests/poller-gate.sh
 	bash tests/codex-poller.sh
 	bash tests/install-hooks.sh
 	bash tests/sentinel-setup.sh
+	bash tests/sentinel-doctor.sh
 	bash tests/group-sync.sh
 	bash tests/zed-bridge.sh
 	bash tests/open-in-zed.sh
@@ -69,7 +74,8 @@ doctor:
 	@./bin/cmux-sentinel-doctor.sh
 
 # sidebar PARSE check — only meaningful where cmux exists (local/pre-commit);
-# skipped in CI. NB: validate only parses; a green parse can still render blank.
+# skipped in CI. NB: validate interprets synthetic data but does not mount/layout;
+# a green result can still render blank on a live-data branch.
 # `cmux sidebar validate` only takes a NAME (it reads ~/.config/cmux/sidebars), so
 # validating `workspaces` would check the DEPLOYED copy, not this repo's file — a
 # broken repo sidebar could pass while the old deployed one is fine. So stage the

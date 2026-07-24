@@ -7,9 +7,11 @@ discover from the code alone, because the failure mode is a **silently blank sid
 
 ## ⚠️ The sidebar interpreter is a SUBSET of SwiftUI — these WILL bite you
 
-`cmux sidebar validate` only **parses**. It passes on files that render **completely blank** at
-runtime, and the interpreter swallows the error (no log). So an edit that "validates" can still
-break everything. Confirmed traps:
+`cmux sidebar validate` parses and interprets against a FIXED SYNTHETIC context, but does not mount
+`RenderNodeView`, run SwiftUI/AppKit layout, or exercise every live-data branch. It can pass files
+that render **completely blank** at runtime. cmux exposes no public rendered-tree/pixel assertion;
+`sidebar open/select/reload` plus an eyeball is the practical ceiling. See
+`docs/sidebar-render-validation.md` for the upstream source audit. Confirmed traps:
 
 - **String ops `.hasPrefix` / `.contains` / `.hasSuffix` / `.split` DO work** on the current build
   (proven by probe: `hasPrefix=Y contains=Y hasSuffix=Y`; the live sidebar detects the working/
@@ -81,9 +83,10 @@ break everything. Confirmed traps:
 - **Meters use a native value bar now.** `ProgressView(value:)` needs a numeric `progress`; the
   poller supplies it via `set-progress` (see the progress bullet above), so a meter row renders a
   native `ProgressView` tinted from the value (red ≥90%, amber ≥70%, else blue) with
-  `w.progress.label` for the text. The Unicode block bar (`▏▎▍▌▋▊▉█`) baked into the title is the
-  FALLBACK the sidebar draws when `progress` is absent. The title's severity emoji (🟡/🔴) stays
-  because title **color** still can't come from data.
+  `w.progress.label` for compact `28% (1h 54m)` text. The title uses
+  `<anchor> |<detail>|<unicode bar>` so the fallback keeps the same label/detail-then-bar rhythm when
+  `progress` is absent. The title's severity emoji (🟡/🔴) stays because title **color** still can't
+  come from data.
 - **Workspace-GROUP data NEVER reaches the sidebar interpreter** (probed 2026-06-19, see
   `.claude/research/2026-06-19-workspace-group-names-in-sidebar.md`). There is no `groups` binding and
   no per-workspace group field — referencing `groups` renders empty (the interpreter is lenient, it
@@ -138,28 +141,28 @@ reload` after each) until it blanks. That isolates the bad construct in ~3 steps
 ```bash
 # sidebar
 cp sidebars/workspaces.swift ~/.config/cmux/sidebars/workspaces.swift
-cmux sidebar validate workspaces && cmux sidebar reload   # validate only PARSES — also eyeball it
+cmux sidebar validate workspaces && cmux sidebar reload   # synthetic interpretation only — eyeball it
 
 # pollers (no cmux writes unless --update)
 ./bin/cmux-claude-usage.sh --print     # parsed values
 ./bin/cmux-claude-usage.sh --raw       # raw API JSON (no token)
-./bin/cmux-claude-usage.sh --update    # actually renames the sentinels
+./bin/cmux-claude-usage.sh --update    # writes title fallback + native progress
 ./bin/cmux-codex-usage.sh --print      # Codex: live utilization from ChatGPT wham/usage
 ./bin/cmux-codex-usage.sh --raw        # raw wham/usage JSON (token NOT included)
-./bin/cmux-codex-usage.sh --update     # renames cx5h/cx7d (needs USAGE_PROVIDERS to list codex)
+./bin/cmux-codex-usage.sh --update     # writes cx5h/cx7d title + progress (needs codex enabled)
 ./bin/cmux-codex-usage.sh --buckets    # which windows the account HAS (empty = can't tell); drives setup
 ./bin/cmux-amp-usage.sh --print        # Amp: monthly subscription allowance (scraped from `amp usage`)
 ./bin/cmux-amp-usage.sh --raw          # raw `amp usage` text (CONTAINS YOUR EMAIL — stays local)
-./bin/cmux-amp-usage.sh --update       # renames ampu (+ampo if AMP_ORB_METER=1); needs USAGE_PROVIDERS to list amp
+./bin/cmux-amp-usage.sh --update       # writes ampu (+opt-in ampo) title + progress; needs amp enabled
 ./bin/cmux-amp-usage.sh --buckets      # which allowances to meter (empty = can't tell); drives setup
-./bin/cmux-sentinel-setup.sh           # create sentinels (live windows only) + park them out of ⌘1…⌘9 (--no-layout skips)
+./bin/cmux-sentinel-setup.sh           # create known-live provider sentinels; fail open when unknown + park them out of ⌘1…⌘9
 ./bin/cmux-group-sync.sh --list        # workspace-GROUP names: which anchors are out of sync (read-only)
 ./bin/cmux-group-sync.sh --update      # rename group anchors to the group name (needs GROUP_NAME_SYNC=1)
 
 # offline tests (stub cmux/security/curl/$HOME — run in CI too)
-make test   # bridge-state(36) poller-gate(21) codex-poller(44) install-hooks(21) sentinel-setup(44)
-            # group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(16)
-            # amp-bridge(37) amp-poller(36)
+make test   # bridge-state(36) poller-gate(34) codex-poller(63) install-hooks(35) sentinel-setup(50)
+            # sentinel-doctor(23) group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(23)
+            # amp-bridge(43) amp-poller(45) = 414 assertions total
 ```
 
 ## Architecture / where things live
@@ -169,15 +172,15 @@ sidebars/workspaces.swift  the sidebar. isClaudeMeter()/isCodexMeter()/isAmpMete
 bin/cmux-claude-usage.sh    Claude usage poller. make_bar / sev_dot / mark_offline / bucket_field / to_pct / resolve_ref(+_paint, multi-window).
 bin/cmux-codex-usage.sh     Codex usage poller (ChatGPT wham/usage endpoint; token from ~/.codex/auth.json). read_token / fetch_usage / make_bar / sev_dot / mark_offline / to_pct / resolve_ref(+_paint) / --buckets (live windows, for setup).
 bin/cmux-amp-usage.sh       Amp usage poller (scrapes `amp usage` PROSE — no --json). Monthly allowance, not windows. REMAINING→USED inversion. ampu (agent) + ampo (orb, opt-in AMP_ORB_METER=1).
-bin/cmux-sentinel-setup.sh  idempotent sentinel creation (per USAGE_PROVIDERS × live windows: live_buckets/ensure_live) + auto-naming guard probe + ⌘N shortcut layout (layout/sentinel_window, --no-layout).
+bin/cmux-sentinel-setup.sh  idempotent sentinel creation (per USAGE_PROVIDERS; known-live buckets only, fail-open on unknown) + auto-naming guard probe + ⌘N shortcut layout (layout/sentinel_window, --no-layout).
 bin/cmux-sentinel-doctor.sh READ-ONLY wiring report: cmux/sidebar/bridge/auto-refresh, installed × enabled × sentinel per provider, ⌘N layout drift, snapshot data.
 bin/cmux-group-sync.sh      workspace-GROUP name → anchor-title sync (opt-in GROUP_NAME_SYNC). split-marker / multi-window / --list|--raw|--update.
 hooks/cmux-bridge.sh        Claude Code → cmux agent-state bridge (⚡ working / ⏳ compacting / ❓ waiting-on-you rows). AGENT-AGNOSTIC: CMUX_SENTINEL_SESSION_PID / _AGENT_LABEL / _LOG_SOURCE let any agent's adapter reuse it.
 hooks/amp-bridge.ts         Amp plugin (Bun/TS) → drives cmux-bridge.sh. Thin ADAPTER, no own state, so amp+claude co-tenants ref-count in one $WORKROOT. 2-of-3 states (no ⏳; ❓ opt-in).
-hooks/zed-bridge.sh         OPT-IN (ZED_SENTINEL=1) cmux-free Zed bridge: same ⚡/⏳/❓ markers to OSC terminal-title + JSON sink.
+hooks/zed-bridge.sh         OPT-IN (ZED_SENTINEL=1) cmux-free Zed bridge: same ⚡/⏳/❓ markers to OSC-2 terminal metadata + JSON sink (stock Zed tab label stays process-derived).
 bin/cmux-open-in-zed.sh     OPT-IN cmux→Zed worktree handoff (`ze` alias / Ctrl-O via --shell-init). git-toplevel-aware; switch/--add/--new/--print.
 bin/zed-usage-tui.sh        OPT-IN usage meters rendered in a Zed terminal pane (reuses the pollers). No cmux writes.
-tests/                      bridge-state + poller-gate + codex-poller + amp-poller + install-hooks + sentinel-setup + group-sync + zed-bridge + open-in-zed + usage-tui + amp-bridge. `make test`.
+tests/                      bridge-state + poller-gate + codex-poller + amp-poller + install-hooks + sentinel-setup + sentinel-doctor + group-sync + zed-bridge + open-in-zed + usage-tui + amp-bridge. `make test`.
 examples/                   usage-sentinels.env + launchd plist templates (com.cmux-claude-usage / com.cmux-codex-usage / com.cmux-amp-usage / com.cmux-group-sync).
 ```
 
@@ -215,7 +218,11 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   That's load-bearing: co-tenant agents in one workspace must ref-count against each other, which
   only works if they share one `$WORKROOT`. So the bridge grew three agent-agnostic knobs
   (`CMUX_SENTINEL_SESSION_PID` / `_AGENT_LABEL` / `_LOG_SOURCE`; defaults keep Claude Code
-  byte-identical). `tests/amp-bridge.sh` pins the co-tenancy property explicitly.
+  byte-identical). `tests/amp-bridge.sh` pins the co-tenancy property explicitly. The plugin probes
+  `cmux-bridge.sh --capabilities` by OUTPUT (old bridges ignore unknown events and still exit 0): a
+  new bridge handles terminal Amp errors atomically with `StopFailureFinal`; an old bridge gets the
+  synchronous ordered fallback `SessionEnd` then `StopFailure`, so a partial manual update cannot
+  strand ⚡, clear its own error pill, or emit `Stop`'s misleading finished notification.
   **Coverage is 2-of-3 and the gaps are Amp's:** ⚡ from `agent.start` + `tool.call`, cleared by
   `agent.end`; **⏳ compacting is IMPOSSIBLE** (Amp emits no compaction event — don't fake it); **❓
   waiting is opt-in** (`CMUX_SENTINEL_AMP_ASK=1`) because Amp doesn't ask permission by default, so
@@ -223,7 +230,8 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   Under `amp -x`, lifecycle events are SKIPPED unless you pass `--plugin-ready-timeout`.
 - **Usage meters group by provider:** each provider gets its own labelled panel section
   (`CLAUDE USAGE`, `CODEX USAGE`, `AMP USAGE`) — same component reused. A meter is just an idle
-  "sentinel" workspace whose title a poller keeps updated. **Three providers ship:** Claude
+  "sentinel" workspace whose poller updates both native progress and a title anchor/fallback.
+  **Three providers ship:** Claude
   (`bin/cmux-claude-usage.sh`, OAuth usage endpoint), Codex (`bin/cmux-codex-usage.sh`) and Amp
   (`bin/cmux-amp-usage.sh` — CLI scrape, see its own bullet below). The first two
   hit a provider **usage endpoint** with a locally-stored OAuth token: Codex reads ChatGPT's
@@ -235,7 +243,8 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   Code drives Codex) doesn't write `rate_limits` (openai/codex#14880) and fresh data moved to
   non-queryable sqlite, so the meter went weeks-stale; the endpoint is account-server-side, so it's
   correct for any usage pattern. `wham/usage` is unofficial → parse defensively; API-key logins
-  aren't covered (no panel). Decision/research:
+  aren't covered (and any existing sentinels must still be closed to hide their panel).
+  Current source audit: `docs/usage-data-source-research.md`. Earlier decision record:
   `.claude/research/2026-07-06-codex-usage-api-source.md`. To add a FOURTH provider: create a
   sentinel, add an `isXMeter()` predicate + an `if isXMeter(w)` line to `isUsageMeter()` + an
   `X USAGE` panel section, a poller with a new data source, then wire it into
@@ -254,13 +263,14 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   2. **The numbers are REMAINING; the meters show USED.** Amp prints "100% other usage …
      remaining" for an untouched allowance, so every value is inverted (`used = 100 - remaining`).
      Get this backwards and a brand-new subscription renders a FULL red bar. It has its own test.
-  Also: not rolling windows but ONE monthly allowance, so the reset text is Amp's own phrase
-  ("in 1 month") rather than a computed countdown, and the `$` workspace credit balance is
+  Also: not rolling windows but ONE monthly allowance, so reset text comes from Amp's own phrase
+  rather than a computed countdown (simple units are compacted for display: `26 days` → `26d`),
+  and the `$` workspace credit balance is
   deliberately not metered (a currency balance has no honest 0-100% bar). **`ampo` (orb usage) is
   opt-in via `AMP_ORB_METER=1`** — same "a dead meter is NOT free" rule as the retired `cx5h`:
-  most people never run orbs, so metering it by default would cost a real ⌘ key to show a
-  permanent 100%. `provider_available()` checks the binary plus the mere EXISTENCE of
-  `~/.local/share/amp/secrets.json` — never read it, it holds credentials.
+  most people never run orbs, so metering it by default would cost a real ⌘ key for an unused row.
+  `provider_available()` checks the binary plus a non-empty
+  `~/.local/share/amp/secrets.json` — it never reads the file, which holds credentials.
 - **A provider may not HAVE a window we model — and a dead meter is NOT free.** A sentinel is
   an ordinary workspace, so a permanently-`n/a` row still eats one of the ⌘1…⌘9 keys to show
   nothing. OpenAI dropped the **5h window for Codex Pro** — confirmed permanent 2026-07-16
@@ -277,6 +287,9 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   5min — dying there would fail forever over a meter that's correctly gone), but a **live**
   window with a missing sentinel still dies (a real broken install). Setup still **never
   closes anything** — retiring a live sentinel is a manual `cmux workspace close`.
+  Diagnostics use the separate machine-readable `--status` mode, which distinguishes
+  `available` bucket sets from `unknown`, `disabled`, and `uninstalled`; doctor retains the current
+  layout on `unknown` instead of inventing a missing-window warning.
   See `.claude/research/2026-07-16-codex-5h-window-gone-for-pro.md`.
 - **Provider selection is gated, not configured in the sidebar** (it can't read config — only
   workspace data). A provider's panel shows IFF its sentinels exist, and the sidebar auto-hides any
@@ -295,12 +308,12 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
 
 ## Conventions & security
 
-- **Never commit secrets.** The OAuth token is read from the macOS Keychain at runtime — keep it
-  that way. No tokens, no real workspace UUIDs, no usernames in committed files. (The sidebar carries
+- **Never commit secrets.** OAuth tokens are read from provider-owned local credential stores at
+  runtime — keep them there. No tokens, no real workspace UUIDs, no usernames in committed files. (The sidebar carries
   no ids at all now — it matches sentinels by title label — so there's nothing to placeholder.)
 - Dependency-light: bash + `jq` + `curl` + macOS `date`. Terse comments about *why*.
 - **Run `make check` before proposing a commit** — shellcheck + the secret guard
-  (`scripts/check-secrets.sh`) + markdownlint + sidebar parse. `lefthook install` wires the same
+  (`scripts/check-secrets.sh`) + markdownlint + offline tests + sidebar validation. `lefthook install` wires the same
   gates into git hooks; CI runs `make ci`. The secret guard is the load-bearing one (blocks real
   UUIDs / tokens / `/Users/<name>` paths and asserts the sidebar keeps its title-label meter anchors).
 - See `CONTRIBUTING.md` for the dev loop and PR norms. (Maintainers may keep gitignored working

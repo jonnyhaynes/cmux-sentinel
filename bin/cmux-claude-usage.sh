@@ -10,13 +10,14 @@
 # The OAuth token is read FRESH from the macOS Keychain each run (Claude Code
 # refreshes it there ~hourly). It is never printed or persisted.
 #
-# Display channel: each metric rides a dedicated idle "sentinel" workspace, but
-# the custom sidebar's workspace data does NOT carry `progress` for idle
-# workspaces (only the active/agent workspace) — the TITLE, however, always
-# propagates. So we encode a unicode-block bar directly in the title via
-# `rename-workspace`: "5h ████░░░░░░ 39% 4h35m". The sidebar matches the two
-# sentinels by their TITLE LABEL ("5h "/"7d ", via .hasPrefix) and renders their
-# titles in a top USAGE panel, hidden from the normal list.
+# Display channel: each metric rides a dedicated idle "sentinel" workspace.
+# `progress` reaches the custom sidebar once set, so every update writes a native
+# progress value + compact label. It also renames the TITLE to a restart-proof
+# fallback: "5h |39% (4h 35m)|█████░░░░░░░░░". The title survives bootstrap,
+# offline clears, dropped writes, and restarts before the next poll, and its leading
+# label remains the stable identity anchor. The sidebar matches "5h "/"7d " via
+# `.hasPrefix`, renders human labels + native bars in the top panel, and hides the
+# sentinels from the normal list. `|` separates fallback detail from fallback bar.
 #
 # Identity: cmux 0.64.15 removed stable workspace UUIDs from the model and from
 # `workspace list --json` (id is null) — the only handle is a positional `ref`
@@ -33,7 +34,8 @@
 # Provider gating (which usage meters show, robustly): a provider's panel shows in
 # the sidebar IFF its sentinels exist, and the sidebar hides any provider with
 # none. This poller is the CLAUDE provider and SELF-GATES so an uninstalled or
-# disabled Claude never crashes, spams the launchd .err, or shows a broken panel:
+# disabled Claude never crashes or spams the launchd .err. Existing sentinels are
+# a separate concern: they keep a panel visible until closed, and doctor flags them.
 #   * disabled (USAGE_PROVIDERS doesn't list "claude") → exit 0, do nothing.
 #   * not installed (no Keychain item AND no ~/.claude/.credentials.json) → exit 0,
 #     do nothing. "Not installed" ≠ "token expired": an EXPIRED token (creds exist
@@ -187,15 +189,15 @@ iso_to_epoch() {
   date -j -f "%Y-%m-%dT%H:%M:%S%z" "$iso" +%s 2>/dev/null || echo ""
 }
 
-# epoch -> compact "in" duration: "now" | "37m" | "4h12m" | "2d3h"
+# epoch -> compact "in" duration: "now" | "37m" | "4h 12m" | "2d 3h"
 humanize_until() {
   local target="$1" now diff d h m
   [ -n "$target" ] || { echo "?"; return; }
   now=$(date +%s); diff=$(( target - now ))
   [ "$diff" -gt 0 ] || { echo "now"; return; }
   d=$(( diff/86400 )); h=$(( (diff%86400)/3600 )); m=$(( (diff%3600)/60 ))
-  if   [ "$d" -gt 0 ]; then echo "${d}d${h}h"
-  elif [ "$h" -gt 0 ]; then echo "${h}h${m}m"
+  if   [ "$d" -gt 0 ]; then echo "${d}d ${h}h"
+  elif [ "$h" -gt 0 ]; then echo "${h}h ${m}m"
   else echo "${m}m"; fi
 }
 
@@ -241,8 +243,8 @@ sev_dot() {
 mark_offline() {
   local reason="${1:-offline}"
   cmux ping &>/dev/null || return 0
-  _paint "$LABEL_5H" "$LABEL_5H  ⚠ ${reason}" >/dev/null 2>&1 || true
-  _paint "$LABEL_7D" "$LABEL_7D  ⚠ ${reason}" >/dev/null 2>&1 || true
+  _paint "$LABEL_5H" "$LABEL_5H |⚠ ${reason}|" >/dev/null 2>&1 || true
+  _paint "$LABEL_7D" "$LABEL_7D |⚠ ${reason}|" >/dev/null 2>&1 || true
   # Drop any stale native bar so the "⚠ offline" title shows through (else the
   # sidebar keeps drawing the last good ProgressView on top of an offline title).
   _clear_progress "$LABEL_5H"; _clear_progress "$LABEL_7D"
@@ -254,10 +256,10 @@ bucket_field() { # $1=json $2=bucket_snake $3=bucket_camel $4=field_snake $5=fie
     '((.[$bs] // .[$bc]) // {}) | (.[$fs] // .[$fc] // empty)' 2>/dev/null
 }
 
-# Coerce an arbitrary field value to a clamped integer percent (0-100), rounded.
+# Coerce a validated numeric field to a clamped integer percent (0-100), rounded.
 # Done entirely in jq so untrusted API text is NEVER interpolated into a shell/awk
-# program (the endpoint is unofficial/beta — a malformed or hostile utilization
-# value must not break or inject the script); null/missing/non-numeric → 0.
+# program. Schema validation in main rejects missing/non-numeric values before
+# this runs, so an upstream shape change can never become a plausible 0% meter.
 to_pct() { # $1 = raw value (may be empty, null, or non-numeric)
   jq -rn --arg v "${1:-}" '
     (($v | tonumber?) // 0)
@@ -272,9 +274,9 @@ to_frac() { jq -rn --argjson p "${1:-0}" '$p / 100' 2>/dev/null || printf '0'; }
 main() {
   local mode="${1:---print}" token json
 
-  # Provider gate (robustness): never crash, error-spam, or leave a broken panel
-  # for a provider that's turned off or not installed. The sidebar hides a provider
-  # whose sentinels are absent, so a clean exit 0 here = no panel, no noise. An
+  # Provider gate (robustness): never crash or error-spam for a provider that's
+  # turned off or not installed. A clean exit does not remove existing sentinels;
+  # panel visibility is determined by sentinel presence and doctor flags leftovers. An
   # EXPIRED token is NOT caught here (creds still exist) — it falls through to the
   # transient '⚠ offline' path below, which is the genuinely useful signal.
   if ! provider_enabled; then
@@ -295,6 +297,24 @@ main() {
   if [ "$mode" = "--raw" ]; then
     printf '%s\n' "$json" | jq . 2>/dev/null || printf '%s\n' "$json"
     return
+  fi
+
+  # The endpoint is unofficial. Validate BOTH required buckets and utilization
+  # values before converting anything: jq's `empty` plus to_pct's safety fallback
+  # used to turn a renamed or missing bucket into a believable 0% meter. Reset
+  # timestamps are optional presentation data; malformed/missing values honestly
+  # degrade to "?" without hiding a valid percentage. Keep camelCase fallbacks
+  # because both shapes have existed.
+  if ! printf '%s' "$json" | jq -e '
+      def valid_bucket($snake; $camel):
+        (.[$snake] // .[$camel]) as $b
+        | (($b | type) == "object")
+          and (($b.utilization | type) == "number");
+      valid_bucket("five_hour"; "fiveHour")
+      and valid_bucket("seven_day"; "sevenDay")
+    ' >/dev/null 2>&1; then
+    [ "$mode" = "--update" ] && mark_offline "no data"
+    die "usage response is missing required five_hour/seven_day fields (endpoint schema changed?)"
   fi
 
   local fh_pct fh_reset sd_pct sd_reset fh_epoch sd_epoch fh_human sd_human
@@ -318,28 +338,28 @@ main() {
     # startup — a broken-pipe rejection here means cmux is still on cmuxOnly and
     # must be restarted to apply the mode.
     cmux ping &>/dev/null || die "cmux socket rejected (restart cmux to apply socketControlMode=automation)"
-    # The custom sidebar's workspace data does NOT carry `progress` for idle
-    # workspaces (only set on the active/agent workspace) — but the title always
-    # propagates. So encode the bar + percent + reset directly in the title. The
-    # label leads, the severity dot trails — both sides anchor on the label.
+    # Write both display channels: native progress is the normal render; the title
+    # carries the compact detail + unicode bar fallback and the stable label anchor.
+    # The label leads and the optional severity dot trails.
     local fh_bar sd_bar fh_dot sd_dot fh_frac sd_frac fh_lbl sd_lbl err rc
-    fh_bar=$(make_bar "$fh_pct" 10); fh_dot=$(sev_dot "$fh_pct"); fh_frac=$(to_frac "$fh_pct")
-    sd_bar=$(make_bar "$sd_pct" 10); sd_dot=$(sev_dot "$sd_pct"); sd_frac=$(to_frac "$sd_pct")
-    # Clean progress label = pct + reset + severity dot, NO unicode bar (the native
-    # ProgressView draws the bar now). ASCII-led so cmux's multibyte-prefix coalescer
-    # bug can't eat it; the emoji dot only ever trails.
-    fh_lbl="${fh_pct}% ${fh_human}${fh_dot}"
-    sd_lbl="${sd_pct}% ${sd_human}${sd_dot}"
+    fh_bar=$(make_bar "$fh_pct" 14); fh_dot=$(sev_dot "$fh_pct"); fh_frac=$(to_frac "$fh_pct")
+    sd_bar=$(make_bar "$sd_pct" 14); sd_dot=$(sev_dot "$sd_pct"); sd_frac=$(to_frac "$sd_pct")
+    # Compact progress label = pct + parenthesized countdown. The native bar already
+    # communicates "usage", so repeating "resets" wastes the narrow right column.
+    # ASCII-led so cmux's multibyte-prefix coalescer bug can't eat it; the optional
+    # severity dot only ever trails.
+    fh_lbl="${fh_pct}% (${fh_human})${fh_dot}"
+    sd_lbl="${sd_pct}% (${sd_human})${sd_dot}"
     # _meter_write resolves each sentinel FRESH by title label (across windows), then
     # writes BOTH the title (unicode-bar fallback + anchor) and the native progress
     # bar. The `ping` gate passing does NOT guarantee the write lands (socket auth
     # could drop mid-run, a ref could go stale, or the sentinel could be gone), so
     # check each: rc 10 = no sentinel (tell the user to create it), rc 11 = cmux
     # rejected the rename (surface its stderr).
-    err=$(_meter_write "$LABEL_5H" "$LABEL_5H ${fh_bar} ${fh_pct}% ${fh_human}${fh_dot}" "$fh_frac" "$fh_lbl"); rc=$?
+    err=$(_meter_write "$LABEL_5H" "$LABEL_5H |${fh_lbl}|${fh_bar}" "$fh_frac" "$fh_lbl"); rc=$?
     [ "$rc" = 10 ] && die "no '$LABEL_5H' sentinel workspace (title \"$LABEL_5H\" or starting \"$LABEL_5H \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
     [ "$rc" = 11 ] && die "rename rejected for $LABEL_5H sentinel: ${err:-no detail}"
-    err=$(_meter_write "$LABEL_7D" "$LABEL_7D ${sd_bar} ${sd_pct}% ${sd_human}${sd_dot}" "$sd_frac" "$sd_lbl"); rc=$?
+    err=$(_meter_write "$LABEL_7D" "$LABEL_7D |${sd_lbl}|${sd_bar}" "$sd_frac" "$sd_lbl"); rc=$?
     [ "$rc" = 10 ] && die "no '$LABEL_7D' sentinel workspace (title \"$LABEL_7D\" or starting \"$LABEL_7D \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
     [ "$rc" = 11 ] && die "rename rejected for $LABEL_7D sentinel: ${err:-no detail}"
     echo "updated: ${LABEL_5H}=${fh_pct}% (${fh_human})  ${LABEL_7D}=${sd_pct}% (${sd_human})"

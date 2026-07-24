@@ -33,27 +33,49 @@
 //     because turning it on CHANGES AMP'S BEHAVIOUR (it starts prompting), which
 //     a status bridge has no business doing uninvited.
 //
-// Every cmux write is fire-and-forget and errors are swallowed: a sidebar marker
-// must never break, block, or slow down the agent it is reporting on.
+// Normal cmux writes are fire-and-forget and errors are swallowed. The only
+// synchronous path is a terminal error paired with an old bridge, where ordering
+// is required for correctness and the turn has already ended.
 
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
 // Resolve the bash bridge. Env override first (tests and non-standard checkouts),
-// then the repo layout, then the installed location.
-function bridgePath(): string | null {
+// then Amp's neutral installed dependency, then the explicit Claude integration's
+// copy for backward compatibility with older installs.
+function bridgePath() {
   const candidates = [
     process.env.CMUX_SENTINEL_BRIDGE,
-    join(homedir(), ".claude/hooks/cmux-bridge.sh"), // where install.sh puts it
     join(homedir(), ".config/cmux-sentinel/cmux-bridge.sh"),
-  ].filter((p): p is string => typeof p === "string" && p.length > 0)
+    join(homedir(), ".claude/hooks/cmux-bridge.sh"),
+  ].filter((p) => typeof p === "string" && p.length > 0)
   for (const p of candidates) if (existsSync(p)) return p
   return null
 }
 
 const BRIDGE = bridgePath()
+
+// The plugin and bridge are installed as two files. A manual partial copy can
+// pair this plugin with an older bridge that silently ignores StopFailureFinal
+// (unknown bridge events return success). Probe stdout once at load: output is
+// the capability contract; exit status alone proves nothing.
+function supportsFinalFailure() {
+  if (!BRIDGE) return false
+  try {
+    const result = spawnSync("bash", [BRIDGE, "--capabilities"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1000,
+    })
+    return typeof result.stdout === "string" && result.stdout.includes("stop-failure-final")
+  } catch (_) {
+    return false
+  }
+}
+
+const SUPPORTS_FINAL_FAILURE = supportsFinalFailure()
 
 // One amp process = one session for ref-counting. The bridge keys liveness on
 // this pid (kill -0), so a crashed amp can never strand a ⚡ on the workspace.
@@ -61,7 +83,7 @@ const SESSION_PID = String(process.pid)
 
 // Drive the bash bridge with an event name + JSON on stdin, exactly as Claude
 // Code's hooks do. Detached and fully ignored: never block the agent's turn.
-function drive(event: string, payload: Record<string, unknown> = {}): void {
+function drive(event, payload = {}) {
   if (!BRIDGE) return
   if (!process.env.CMUX_WORKSPACE_ID) return // not inside a cmux workspace
   try {
@@ -82,6 +104,27 @@ function drive(event: string, payload: Record<string, unknown> = {}): void {
   } catch (_) {}
 }
 
+// Compatibility path for an old bridge: the terminal clear must finish before
+// StopFailure reports the error, or SessionEnd immediately erases the new status
+// pill. Two detached calls could reorder, so both steps are synchronous.
+function driveSync(event, payload = {}) {
+  if (!BRIDGE) return
+  if (!process.env.CMUX_WORKSPACE_ID) return
+  try {
+    spawnSync("bash", [BRIDGE, event], {
+      env: {
+        ...process.env,
+        CMUX_SENTINEL_SESSION_PID: SESSION_PID,
+        CMUX_SENTINEL_AGENT_LABEL: "Amp",
+        CMUX_SENTINEL_LOG_SOURCE: "amp",
+      },
+      input: JSON.stringify({ hook_event_name: event, ...payload }),
+      stdio: ["pipe", "ignore", "ignore"],
+      timeout: 5000,
+    })
+  } catch (_) {}
+}
+
 // ── opt-in ❓ waiting ──────────────────────────────────────────────────────
 const ASK_ENABLED = process.env.CMUX_SENTINEL_AMP_ASK === "1"
 const ASK_TOOLS = (process.env.CMUX_SENTINEL_AMP_ASK_TOOLS || "Bash")
@@ -89,18 +132,18 @@ const ASK_TOOLS = (process.env.CMUX_SENTINEL_AMP_ASK_TOOLS || "Bash")
   .map((s) => s.trim())
   .filter(Boolean)
 
-export default function (amp: any) {
+export default function (amp) {
   amp.on("session.start", () => {
     // Reconcile markers we still track and strip any stranded by a reboot wiping
     // $TMPDIR. Same self-heal Claude Code's SessionStart does.
     drive("SessionStart", { source: "startup" })
   })
 
-  amp.on("agent.start", (event: any) => {
+  amp.on("agent.start", (event) => {
     drive("UserPromptSubmit", { prompt: typeof event?.message === "string" ? event.message : "" })
   })
 
-  amp.on("tool.call", async (event: any, ctx: any) => {
+  amp.on("tool.call", async (event, ctx) => {
     const tool = typeof event?.tool === "string" ? event.tool : ""
 
     if (ASK_ENABLED && ASK_TOOLS.includes(tool)) {
@@ -127,12 +170,20 @@ export default function (amp: any) {
     return { action: "allow" }
   })
 
-  amp.on("agent.end", (event: any) => {
+  amp.on("agent.end", (event) => {
     const status = event?.status
     if (status === "error") {
-      // Surface it, but do NOT decrement the session: the bridge treats
-      // StopFailure as transient and lets PID-liveness reap a truly dead one.
-      drive("StopFailure", { error: "Amp turn failed" })
+      // New bridge: one atomic report+clear event. Old bridge: synchronous ordered
+      // fallback; it does not understand StopFailureFinal, and detached calls race.
+      if (SUPPORTS_FINAL_FAILURE) {
+        drive("StopFailureFinal", { error: "Amp turn failed" })
+      } else {
+        // SessionEnd clears the legacy session without Stop's misleading
+        // "Finished responding" notification. Report the failure SECOND so
+        // SessionEnd cannot immediately clear the native error pill it creates.
+        driveSync("SessionEnd", {})
+        driveSync("StopFailure", { error: "Amp turn failed" })
+      }
       return
     }
     // done | cancelled — both mean this turn is over and the row goes idle.

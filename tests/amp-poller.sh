@@ -28,7 +28,7 @@ cat > "$ROOT/bin/cmux" <<'FAKE'
 LOG="$AMPTEST/.renames"
 PLOG="$AMPTEST/.progress"
 case "$1" in
-  ping) exit 0 ;;
+  ping) [ "${STUB_CMUX_DOWN:-0}" != "1" ]; exit ;;
   list-windows) exit 0 ;;
   workspace)
     if [ "$2" = "list" ]; then
@@ -44,7 +44,9 @@ case "$1" in
     while [ $# -gt 0 ]; do case "$1" in --workspace|--window) shift 2 ;; *) title="$1"; shift ;; esac; done
     printf '%s\n' "$title" >> "$LOG"; exit 0 ;;
   set-progress)
-    shift; printf '%s\n' "$1" >> "$PLOG"; exit 0 ;;
+    shift; value="$1"; shift; label=""
+    while [ $# -gt 0 ]; do case "$1" in --label) label="$2"; shift 2 ;; --workspace|--window) shift 2 ;; *) shift ;; esac; done
+    printf '%s | %s\n' "$value" "$label" >> "$PLOG"; exit 0 ;;
   clear-progress) printf 'CLEARED\n' >> "$PLOG"; exit 0 ;;
 esac
 exit 0
@@ -146,6 +148,15 @@ out=$(AMP_FIXTURE="$REWORDED" run --print)
 has "reworded+reordered still 77% used" "$out" "ampu: 77% used"
 has "reworded+reordered orb still 29%"  "$out" "ampo: 29% used"
 
+# The title fallback uses `|` as its field delimiter. Upstream prose must never
+# inject a third field or turn reset text into the fallback bar.
+DELIMITED='Subscription X: 23% other usage and 71% orb usage remaining - resets upon renewal in 12|days'
+reset_logs
+AMP_FIXTURE="$DELIMITED" run --update >/dev/null
+renames="$(cat "$ROOT/.renames")"
+has "reset prose cannot inject the title delimiter" "$renames" "77% (12days)"
+is "fallback retains exactly two structural delimiters" "$(printf '%s' "$renames" | tr -cd '|' | wc -c | tr -d ' ')" "2"
+
 # Decimals must not blow up the integer math.
 DECIMAL='Subscription X: 99.5% other usage and 0.4% orb usage remaining - resets upon renewal in 3 days'
 out=$(AMP_FIXTURE="$DECIMAL" run --print)
@@ -174,14 +185,24 @@ has "amp usage failure marks offline" "$(cat "$ROOT/.renames")" "⚠ offline"
 echo "amp-poller: --update paints the meter"
 
 reset_logs
+out=$(STUB_CMUX_DOWN=1 AMP_FIXTURE="$PARTIAL" run --update); rc=$?
+is "dead cmux socket exits non-zero before sentinel writes" "$rc" "1"
+has "dead cmux socket has the actionable diagnostic" "$out" "cmux socket rejected"
+is "dead cmux socket attempts no misleading rename" "$(cat "$ROOT/.renames")" ""
+
+reset_logs
 AMP_FIXTURE="$PARTIAL" run --update >/dev/null
 renames="$(cat "$ROOT/.renames")"
 has "title keeps the label anchor"  "$renames" "ampu "
 has "title carries the used pct"    "$renames" "77%"
-has "title carries the reset"       "$renames" "12 days"
+has "title compacts the reset"      "$renames" "12d"
+hasnt "title omits the long reset"  "$renames" "12 days"
 has "title has a unicode bar"       "$renames" "█"
 has "77% used gets the amber dot"   "$renames" "🟡"
-is  "progress fraction is 0..1"     "$(head -1 "$ROOT/.progress")" "0.77"
+has "fallback title uses the detail/bar delimiter" "$renames" "|"
+is  "progress fraction is 0..1"     "$(head -1 "$ROOT/.progress" | cut -d' ' -f1)" "0.77"
+has "native label uses compact parenthesized countdown" "$(head -1 "$ROOT/.progress")" "77% (12d)"
+hasnt "native label omits redundant resets wording" "$(head -1 "$ROOT/.progress")" "resets"
 
 # Severity thresholds ride USED, so a nearly-exhausted allowance goes red.
 CRIT='Subscription X: 3% other usage and 100% orb usage remaining - resets upon renewal in 2 days'

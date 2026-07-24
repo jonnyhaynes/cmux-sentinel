@@ -68,13 +68,12 @@ ensure() { # $1 = label  $2 = description
 # Codex Pro (2026-07-13; still gone with fresh usage 2026-07-16), so creating cx5h
 # parks a permanently-"n/a" row — and a sentinel is an ordinary workspace, so it eats
 # one of the ⌘1…⌘9 keys to show nothing. So ASK the poller which windows are live
-# (`--buckets`) instead of hardcoding it here; the meter reappears by itself if
-# OpenAI ever restores the window.
+# (`--buckets`) instead of hardcoding it here; a later setup run recreates the
+# meter if OpenAI ever restores the window.
 #
-# Fail-open by design: the poller prints nothing when it can't tell (offline,
-# expired token, not logged in, schema change), and empty means "create both" — the
-# pre-existing behaviour. Only a POSITIVE answer ever suppresses a sentinel, so a
-# flaky network can't quietly cost you a meter.
+# Fail-open by design: a windowed provider prints nothing when it can't tell and
+# empty preserves its normal modeled windows. Only a POSITIVE answer suppresses a
+# normal sentinel. Optional meters (Amp orbs) still require their local opt-in.
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODEX_POLLER="${CODEX_POLLER:-$SELF_DIR/cmux-codex-usage.sh}"
 AMP_POLLER="${AMP_POLLER:-$SELF_DIR/cmux-amp-usage.sh}"
@@ -102,14 +101,16 @@ case " $PROVIDERS " in *" codex "*)
   ensure_live "$LABEL_CX5H" "Codex 5-hour rate meter — managed by cmux-codex-usage.sh; leave idle" "$cx_live"
   ensure_live "$LABEL_CX7D" "Codex weekly rate meter — managed by cmux-codex-usage.sh; leave idle" "$cx_live"
   ;; esac
-# Amp meters a MONTHLY subscription allowance, not rolling windows. Same
-# fail-open --buckets contract as Codex; additionally the poller only lists
-# "ampo" when AMP_ORB_METER=1, so the opt-in orb meter is skipped here by simply
-# never appearing in the live list — no separate branch needed.
+# Amp meters a MONTHLY subscription allowance, not rolling windows. Its normal
+# ampu meter fails open like Codex. The optional ampo meter must also be opted in
+# LOCALLY: an empty --buckets answer means "can't tell", never "enable every
+# optional meter" (that would consume a ⌘ key while AMP_ORB_METER is off).
 case " $PROVIDERS " in *" amp "*)
   amp_live=$(live_buckets "$AMP_POLLER")
   ensure_live "$LABEL_AMPU" "Amp subscription usage meter — managed by cmux-amp-usage.sh; leave idle" "$amp_live"
-  ensure_live "$LABEL_AMPO" "Amp orb usage meter — managed by cmux-amp-usage.sh; leave idle" "$amp_live"
+  if [ "${AMP_ORB_METER:-0}" = 1 ]; then
+    ensure_live "$LABEL_AMPO" "Amp orb usage meter — managed by cmux-amp-usage.sh; leave idle" "$amp_live"
+  fi
   ;; esac
 
 # ── shortcut layout ───────────────────────────────────────────────────────────

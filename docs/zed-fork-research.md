@@ -68,15 +68,16 @@ share one data layer:
   ⚡ working / ⏳ compacting / ❓ waiting-on-you with a precedence rule, writing to cmux's title
   channel. **Shipped: `hooks/zed-bridge.sh`** is the cmux-free Zed counterpart (same event→state
   precedence, no cross-session ref-count since each agent owns its tty) with two sinks:
-  - **OSC** (default) → emits `\e]2;<marker> <title>\007` to the agent's tty, so status shows on
-    the **Zed terminal tab** today with **no fork** (Zed honours OSC 2, confirmed).
+  - **OSC** (default) → emits `\e]2;<marker> <title>\007` to the agent's tty. Zed accepts it into
+    terminal `breadcrumb_text`, but its native tab label remains process-derived; a custom panel can
+    read that metadata.
   - **FILE** (default) → writes `$ZED_SENTINEL_STATE_DIR/<session>.json`
     (`{state, marker, title, project, session, pid, updated}`) — the channel a native Zed panel
     watches via `Fs::watch`. Toggle each with `ZED_SENTINEL_OSC=0` / `ZED_SENTINEL_FILE=0`; pin the
     tab label with `ZED_SENTINEL_TITLE`. Covered by `tests/zed-bridge.sh` (in `make test`).
-- **Usage pollers** — `bin/cmux-claude-usage.sh` / `bin/cmux-codex-usage.sh` are already
-  editor-agnostic. **Shipped: `bin/zed-usage-tui.sh`** renders their `--print` output as the same
-  Unicode block bars (5h/7d + Codex, severity dots) in one dedicated terminal pane — live
+- **Usage pollers** — the Claude, Codex, and Amp pollers are already editor-agnostic.
+  **Shipped: `bin/zed-usage-tui.sh`** renders their `--print` output as the same Unicode block bars
+  and compact countdowns in one dedicated terminal pane — live
   (`ZED_USAGE_INTERVAL`, default 30s) or `--once`. Works in superzed or stock Zed, no fork; providers
   self-gate (disabled/uninstalled → hidden, offline → "⚠ offline"). Covered by `tests/usage-tui.sh`.
   A future native panel can read the same pollers (or the bridge JSON) instead.
@@ -200,7 +201,7 @@ that project in-place** (default in 0.234; `-n` new window, `-a` add as extra ro
 Passing an exact git-worktree path opens that worktree as the project. So the manual dance is
 replaceable by one command run from the cmux terminal (whose `$PWD` already *is* the worktree).
 
-**Proposed integration (tiny, no fork):** `bin/cmux-open-in-zed.sh` — resolve the current cmux
+**Shipped integration (tiny, no fork):** `bin/cmux-open-in-zed.sh` resolves the current cmux
 workspace's worktree root and `exec zed` it; bind it to a cmux key / shell alias so one keystroke
 jumps Zed to exactly what you're working on. Optional `--add` for multi-root. This solves the stated
 pain directly and makes the status/usage panel work genuinely optional.
@@ -238,9 +239,9 @@ disabled, 0 PRs, no contribution docs, `main` mid-refactor, GPL-3. Reference-onl
 
 Given the reframed pain, the priority order is:
 
-1. **Build `bin/cmux-open-in-zed.sh` + a cmux keybind** — the one-keystroke cmux→Zed handoff to the
-   right project/worktree. Smallest possible change, solves the actual annoyance, no fork.
-2. **Usage TUI pane** (reuse the pollers) if you still want meters visible while in Zed.
+1. **Use the shipped `bin/cmux-open-in-zed.sh` + shell keybind** for the one-keystroke cmux→Zed
+   handoff to the right project/worktree.
+2. **Use the shipped usage TUI pane** if you want meters visible while in Zed.
 3. **The terminal-centric panel fork** is now *optional* — only if, after living with #1, you still
    want cmux's full status rail replicated inside Zed rather than glancing back at cmux.
 

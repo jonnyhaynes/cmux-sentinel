@@ -62,6 +62,14 @@ printf '#!/bin/bash\nexit 1\n' > "$ROOT/bin/security"; chmod +x "$ROOT/bin/secur
 cat > "$ROOT/bin/curl" <<'FAKE'
 #!/bin/bash
 [ "${STUB_CURL:-fail}" = "ok" ] || exit 1
+if [ -n "${STUB_MISSING_BUCKET:-}" ]; then
+  printf '{"five_hour":{"utilization":7,"resets_at":"2026-06-19T20:00:00Z"}}\n'
+  exit 0
+fi
+if [ -n "${STUB_BAD_RESET:-}" ]; then
+  printf '{"five_hour":{"utilization":7,"resets_at":null},"seven_day":{"utilization":42,"resets_at":{"unexpected":true}}}\n'
+  exit 0
+fi
 printf '{"five_hour":{"utilization":%s,"resets_at":"2026-06-19T20:00:00Z"},"seven_day":{"utilization":%s,"resets_at":"2026-06-25T00:00:00Z"}}\n' "${STUB_FH:-7}" "${STUB_SH:-42}"
 FAKE
 chmod +x "$ROOT/bin/curl"
@@ -80,8 +88,12 @@ ckno()   { if [ ! -s "$RENAMES" ]; then pass=$((pass + 1)); printf '  ✓ %s (wr
            else fail=$((fail + 1)); printf '  ✗ %s — unexpected renames:\n%s\n' "$1" "$(cat "$RENAMES")"; fi; }
 ckhas()  { if grep -q -- "$2" "$RENAMES" 2>/dev/null; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
            else fail=$((fail + 1)); printf '  ✗ %s — [%s] not in:\n%s\n' "$1" "$2" "$(cat "$RENAMES" 2>/dev/null)"; fi; }
+cknothas(){ if grep -q -- "$2" "$RENAMES" 2>/dev/null; then fail=$((fail + 1)); printf '  ✗ %s — unexpected [%s] in:\n%s\n' "$1" "$2" "$(cat "$RENAMES" 2>/dev/null)"
+           else pass=$((pass + 1)); printf '  ✓ %s\n' "$1"; fi; }
 ckprog() { if grep -q -- "$2" "$PROGRESS" 2>/dev/null; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
            else fail=$((fail + 1)); printf '  ✗ %s — [%s] not in progress log:\n%s\n' "$1" "$2" "$(cat "$PROGRESS" 2>/dev/null)"; fi; }
+ckprognothas() { if grep -q -- "$2" "$PROGRESS" 2>/dev/null; then fail=$((fail + 1)); printf '  ✗ %s — unexpected [%s] in progress log:\n%s\n' "$1" "$2" "$(cat "$PROGRESS" 2>/dev/null)"
+                else pass=$((pass + 1)); printf '  ✓ %s\n' "$1"; fi; }
 reset()  { rm -f "$RENAMES" "$PROGRESS"; }
 
 echo "T1: disabled (USAGE_PROVIDERS without claude) → exit 0, writes nothing"
@@ -108,6 +120,9 @@ ckhas "5h utilization" "7%"
 ckhas "7d utilization" "42%"
 ckprog "5h native progress value (7% → 0.07)" "PROG 0.07"
 ckprog "7d native progress value (42% → 0.42)" "PROG 0.42"
+ckprog "native labels use compact parenthesized countdowns" "% ("
+ckprognothas "native labels omit redundant resets wording" "resets"
+ckhas "fallback title separates detail from the second-row bar" "|"
 
 echo "T5: malformed utilization (over-100 / negative) → clamped, exit 0, no crash"
 reset
@@ -115,10 +130,26 @@ STUB_CURL="ok" STUB_FH="150" STUB_SH="-5" bash "$POLLER" --update; ckcode "over/
 ckhas "over-100 clamped to 100%" "100%"
 ckhas "negative clamped to 0%" "0%"
 
-echo "T5b: non-numeric / null utilization → 0%, exit 0, no crash"
+echo "T5b: non-numeric / null utilization → no data, never a plausible 0%"
 reset
-STUB_CURL="ok" STUB_FH='"abc"' STUB_SH="null" bash "$POLLER" --update; ckcode "string/null --update" "$?" 0
-ckhas "string utilization → 0%" "0%"
+STUB_CURL="ok" STUB_FH='"abc"' STUB_SH="null" bash "$POLLER" --update; ckcode "string/null --update" "$?" 1
+ckhas "malformed utilization stamps no data" "⚠ no data"
+cknothas "malformed utilization never paints 0%" "0%"
+ckprog "malformed utilization clears stale native bars" "CLEAR"
+
+echo "T5c: malformed reset timestamps preserve valid percentages with an honest unknown countdown"
+reset
+STUB_CURL="ok" STUB_BAD_RESET=1 bash "$POLLER" --update; ckcode "bad-reset --update" "$?" 0
+ckhas "bad reset keeps valid 5h percentage" "5h |7% (?)|"
+ckhas "bad reset keeps valid 7d percentage" "7d |42% (?)|"
+ckprog "bad reset keeps native progress" "PROG 0.07 | 7% (?)"
+
+echo "T5d: missing required bucket → no data, never a plausible 0%"
+reset
+STUB_CURL="ok" STUB_MISSING_BUCKET=1 bash "$POLLER" --update; ckcode "missing-bucket --update" "$?" 1
+ckhas "missing bucket stamps no data" "⚠ no data"
+cknothas "missing bucket never paints 0%" "0%"
+ckprog "missing bucket clears stale native bars" "CLEAR"
 
 echo "T6: BARE sentinel titles → poller still resolves + renames (bootstrap path)"
 reset

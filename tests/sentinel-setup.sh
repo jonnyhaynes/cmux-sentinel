@@ -153,6 +153,30 @@ cx7d
 USAGE_PROVIDERS="claude codex" CODEX_POLLER="$ROOT/bin/poller" bash "$SETUP" >/dev/null 2>&1
 ck "created cx5h (window came back → meter returns by itself)" created cx5h
 ck "created cx7d" created cx7d
+
+echo "T2e: Amp offline/undetermined + default config → FAILS OPEN to ampu only"
+reset
+stub_poller ''
+USAGE_PROVIDERS="amp" AMP_POLLER="$ROOT/bin/poller" bash "$SETUP" >/dev/null 2>&1
+ck  "created ampu (normal meter fails open)" created ampu
+ckn "did not create opt-in ampo while offline" created ampo
+
+echo "T2f: Amp online + default config → ampu only"
+reset
+stub_poller 'ampu
+'
+USAGE_PROVIDERS="amp" AMP_POLLER="$ROOT/bin/poller" bash "$SETUP" >/dev/null 2>&1
+ck  "created ampu (reported live)" created ampu
+ckn "did not create ampo without opt-in" created ampo
+
+echo "T2g: AMP_ORB_METER=1 → creates ampu + ampo"
+reset
+stub_poller 'ampu
+ampo
+'
+USAGE_PROVIDERS="amp" AMP_ORB_METER=1 AMP_POLLER="$ROOT/bin/poller" bash "$SETUP" >/dev/null 2>&1
+ck "created ampu with orb opt-in" created ampu
+ck "created ampo with orb opt-in" created ampo
 rm -f "$ROOT/bin/poller"
 
 echo "T3: idempotent — existing sentinels are left alone"

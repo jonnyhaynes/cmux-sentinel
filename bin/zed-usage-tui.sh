@@ -1,9 +1,9 @@
 #!/bin/bash
-# zed-usage-tui.sh — render the Claude/Codex usage meters in a terminal pane.
+# zed-usage-tui.sh — render the Claude/Codex/Amp usage meters in a terminal pane.
 #
 # cmux shows the usage bars in its custom sidebar; Zed (and superzed) have no such
 # panel, but they DO have terminals — so run this in one dedicated pane and you get
-# the same 5h/7d + Codex meters alongside your editor. Editor-agnostic: it only
+# the same provider meters alongside your editor. Editor-agnostic: it only
 # reuses the existing pollers, which already handle creds, provider-gating, and
 # offline. No cmux, no network of its own, no fork.
 #
@@ -13,12 +13,14 @@
 #
 # Providers come straight from the pollers (self-gated via USAGE_PROVIDERS), so a
 # disabled/uninstalled provider simply doesn't appear; an available-but-offline one
-# shows "⚠ offline". Override poller paths with CLAUDE_USAGE_BIN / CODEX_USAGE_BIN.
+# shows "⚠ offline". Override poller paths with CLAUDE_USAGE_BIN /
+# CODEX_USAGE_BIN / AMP_USAGE_BIN.
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_BIN="${CLAUDE_USAGE_BIN:-$HERE/cmux-claude-usage.sh}"
 CODEX_BIN="${CODEX_USAGE_BIN:-$HERE/cmux-codex-usage.sh}"
+AMP_BIN="${AMP_USAGE_BIN:-$HERE/cmux-amp-usage.sh}"
 INTERVAL="${ZED_USAGE_INTERVAL:-30}"
 BAR_WIDTH="${ZED_USAGE_BAR_WIDTH:-14}"
 ONCE=0
@@ -70,17 +72,23 @@ render_provider() { # $1 = poller path   $2 = section title
     return 0
   fi
   # Regex in a var: an inline unquoted regex containing `[^(]` confuses bash's parser.
-  local re='^([A-Za-z0-9]+)[[:space:]]+([0-9]+)%.*resets[[:space:]]+([^(]+)'
+  local window_re='^([A-Za-z0-9]+)[[:space:]]+([0-9]+)%.*resets[[:space:]]+([^(]+)'
+  local amp_re='^([A-Za-z0-9]+):[[:space:]]+([0-9]+)%.*resets[[:space:]]+in[[:space:]]+([^,(]+)'
   printf '\033[1m%s\033[0m\n' "$title"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    # "<label>  <pct>%  · resets <human>[  (iso)]" — tolerant of both pollers.
-    if [[ "$line" =~ $re ]]; then
+    # Rolling-window pollers: "<label> <pct>% · resets <human> [(iso)]".
+    if [[ "$line" =~ $window_re ]]; then
       label="${BASH_REMATCH[1]}"; pct="${BASH_REMATCH[2]}"; human="${BASH_REMATCH[3]}"
-      human="$(printf '%s' "$human" | sed -E 's/[[:space:]]+$//')"   # rtrim
-      bar=$(make_bar "$pct" "$BAR_WIDTH"); dot=$(sev_dot "$pct")
-      printf '  %-4s %s %3s%% · %s%s\n' "$label" "$bar" "$pct" "$human" "$dot"
+    # Amp: "ampu: <pct>% used (...), resets in <human>".
+    elif [[ "$line" =~ $amp_re ]]; then
+      label="${BASH_REMATCH[1]}"; pct="${BASH_REMATCH[2]}"; human="${BASH_REMATCH[3]}"
+    else
+      continue
     fi
+    human="$(printf '%s' "$human" | sed -E 's/[[:space:]]+$//')"   # rtrim
+    bar=$(make_bar "$pct" "$BAR_WIDTH"); dot=$(sev_dot "$pct")
+    printf '  %-4s %s %3s%% (%s)%s\n' "$label" "$bar" "$pct" "$human" "$dot"
   done <<<"$out"
   printf '\n'
 }
@@ -88,6 +96,7 @@ render_provider() { # $1 = poller path   $2 = section title
 frame() {
   render_provider "$CLAUDE_BIN" "CLAUDE USAGE"
   render_provider "$CODEX_BIN"  "CODEX USAGE"
+  render_provider "$AMP_BIN"    "AMP USAGE"
 }
 
 if [ "$ONCE" = 1 ]; then frame; exit 0; fi

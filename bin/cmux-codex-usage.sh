@@ -38,10 +38,13 @@
 #   --update    fetch + paint both sentinel workspaces (title + native progress bar)
 #   --buckets   print the labels this account HAS a live window for (one per line);
 #               prints NOTHING when it can't tell. For cmux-sentinel-setup.sh.
+#   --status    print one stable JSON capability result for diagnostics:
+#               available | unknown | disabled | uninstalled. Unlike --buckets,
+#               this distinguishes a known bucket set from a can't-tell result.
 #
-# Provider gating: this is the CODEX provider; it SELF-GATES so it never errors or
-# shows a panel when Codex is absent/disabled (the sidebar hides a provider whose
-# sentinels are missing):
+# Provider gating: this is the CODEX provider; it SELF-GATES so Codex being absent
+# or disabled never errors. The sidebar hides a provider only when its sentinels
+# are absent; an existing sentinel remains visible and doctor flags it.
 #   * disabled (USAGE_PROVIDERS doesn't list "codex"; default is "claude") → exit 0.
 #   * not logged in on a ChatGPT plan (no ~/.codex/auth.json, or auth_mode != chatgpt,
 #     e.g. API-key users whom wham/usage doesn't cover) → exit 0, do nothing.
@@ -68,6 +71,16 @@ USAGE_PROVIDERS="${USAGE_PROVIDERS:-claude}"
 CODEX_TOKEN=""; CODEX_ACCOUNT=""
 
 die() { echo "ERR: $*" >&2; exit 1; }
+
+status_json() { # $1=status  $2=reason  $3=has-5h(0/1)  $4=has-7d(0/1)
+  jq -cn --arg status "$1" --arg reason "$2" \
+    --arg b5 "${3:-0}" --arg b7 "${4:-0}" \
+    --arg l5 "$LABEL_CX5H" --arg l7 "$LABEL_CX7D" '
+      {status: $status,
+       buckets: [if $b5 == "1" then $l5 else empty end,
+                 if $b7 == "1" then $l7 else empty end],
+       reason: $reason}'
+}
 
 provider_enabled() {
   case " $USAGE_PROVIDERS " in *" $PROVIDER_ID "*) return 0 ;; *) return 1 ;; esac
@@ -148,10 +161,12 @@ _clear_progress() { # $1 = label
 # access token + account id, read FRESH each run (Codex refreshes auth.json).
 # Never printed/persisted. Sets CODEX_TOKEN / CODEX_ACCOUNT.
 read_token() {
-  [ -f "$AUTH_JSON" ] || die "no Codex auth (~/.codex/auth.json — run: codex login)"
+  # Return instead of exiting so main can preserve --status's machine-readable
+  # contract if auth.json changes between provider_available and this fresh read.
+  [ -f "$AUTH_JSON" ] || return 1
   CODEX_TOKEN=$(jq -r '.tokens.access_token // empty' "$AUTH_JSON" 2>/dev/null)
   CODEX_ACCOUNT=$(jq -r '.tokens.account_id // empty' "$AUTH_JSON" 2>/dev/null)
-  [ -n "$CODEX_TOKEN" ] || die "no access_token in ~/.codex/auth.json (run: codex login)"
+  [ -n "$CODEX_TOKEN" ] || return 1
 }
 
 # Hit wham/usage with the same auth shape the Codex CLI uses. -f → curl fails
@@ -165,7 +180,7 @@ fetch_usage() {
     -H "Content-Type: application/json"
 }
 
-# epoch -> compact "in" duration: "now" | "37m" | "4h12m" | "2d3h"
+# epoch -> compact "in" duration: "now" | "37m" | "4h 12m" | "2d 3h"
 humanize_until() {
   local target="$1" now diff d h m
   [ -n "$target" ] || { echo "?"; return; }
@@ -173,8 +188,8 @@ humanize_until() {
   now=$(date +%s); diff=$(( target - now ))
   [ "$diff" -gt 0 ] || { echo "now"; return; }
   d=$(( diff/86400 )); h=$(( (diff%86400)/3600 )); m=$(( (diff%3600)/60 ))
-  if   [ "$d" -gt 0 ]; then echo "${d}d${h}h"
-  elif [ "$h" -gt 0 ]; then echo "${h}h${m}m"
+  if   [ "$d" -gt 0 ]; then echo "${d}d ${h}h"
+  elif [ "$h" -gt 0 ]; then echo "${h}h ${m}m"
   else echo "${m}m"; fi
 }
 
@@ -208,10 +223,10 @@ make_bar() {
   printf '%s' "$bar"
 }
 
-# Coerce an arbitrary value to a clamped integer percent (0-100), rounded, entirely
-# in jq — the response is an unofficial endpoint, so a missing/null/string
-# used_percent must clamp to 0 rather than break or inject the shell.
-to_pct() { # $1 = raw value (may be empty, null, or non-numeric)
+# Coerce a validated numeric value to a clamped integer percent (0-100), rounded.
+# main rejects missing/null/string used_percent before this runs, so schema drift
+# becomes explicit no-data rather than a believable 0% meter.
+to_pct() { # $1 = raw numeric value
   jq -rn --arg v "${1:-}" '
     (($v | tonumber?) // 0)
     | if . < 0 then 0 elif . > 100 then 100 else . end
@@ -237,8 +252,8 @@ sev_dot() {
 mark_offline() {
   local reason="${1:-offline}"
   cmux ping &>/dev/null || return 0
-  _paint "$LABEL_CX5H" "$LABEL_CX5H  ⚠ ${reason}" >/dev/null 2>&1 || true
-  _paint "$LABEL_CX7D" "$LABEL_CX7D  ⚠ ${reason}" >/dev/null 2>&1 || true
+  _paint "$LABEL_CX5H" "$LABEL_CX5H |⚠ ${reason}|" >/dev/null 2>&1 || true
+  _paint "$LABEL_CX7D" "$LABEL_CX7D |⚠ ${reason}|" >/dev/null 2>&1 || true
   _clear_progress "$LABEL_CX5H"; _clear_progress "$LABEL_CX7D"
 }
 
@@ -248,9 +263,9 @@ mark_offline() {
 # Keeps the label prefix so resolve_ref + the sidebar anchor still match. Dies on a
 # missing/rejected sentinel, exactly like the inline path it replaced.
 _update_bucket() { # $1=label  $2=na(0/1)  $3=pct  $4=human_reset
-  local label="$1" na="$2" pct="${3:-0}" human="${4:-?}" bar dot frac err rc
+  local label="$1" na="$2" pct="${3:-0}" human="${4:-?}" bar dot frac detail err rc
   if [ "$na" = 1 ]; then
-    err=$(_paint "$label" "$label  n/a"); rc=$?
+    err=$(_paint "$label" "$label |n/a|"); rc=$?
     # No sentinel for a window the account doesn't HAVE is the intended steady state,
     # not a misconfiguration: setup deliberately skips creating one (see its
     # `ensure_live`), and OpenAI dropped the 5h window for Codex Pro. Dying here would
@@ -261,8 +276,9 @@ _update_bucket() { # $1=label  $2=na(0/1)  $3=pct  $4=human_reset
     _clear_progress "$label"
     return
   fi
-  bar=$(make_bar "$pct" 10); dot=$(sev_dot "$pct"); frac=$(to_frac "$pct")
-  err=$(_meter_write "$label" "$label ${bar} ${pct}% ${human}${dot}" "$frac" "${pct}% ${human}${dot}"); rc=$?
+  bar=$(make_bar "$pct" 14); dot=$(sev_dot "$pct"); frac=$(to_frac "$pct")
+  detail="${pct}% (${human})${dot}"
+  err=$(_meter_write "$label" "$label |${detail}|${bar}" "$frac" "$detail"); rc=$?
   [ "$rc" = 10 ] && die "no '$label' sentinel workspace (title \"$label\" or starting \"$label \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
   [ "$rc" = 11 ] && die "rename rejected for $label sentinel: ${err:-no detail}"
 }
@@ -271,20 +287,27 @@ main() {
   local mode="${1:---print}" json
 
   # Provider gate (robustness): a disabled or not-logged-in provider is a clean
-  # no-op — no error spam, no broken panel. The sidebar hides a provider whose
-  # sentinels are absent, so exit 0 here = no panel. An EXPIRED token is NOT caught
+  # no-op — no error spam. Existing sentinels are not removed here, so panel
+  # visibility still follows sentinel presence. An EXPIRED token is NOT caught
   # here (auth.json still exists) — it falls through to the transient '⚠ offline'.
   if ! provider_enabled; then
+    if [ "$mode" = "--status" ]; then status_json "disabled" "provider disabled" 0 0; exit 0; fi
     echo "codex disabled (USAGE_PROVIDERS=\"$USAGE_PROVIDERS\") — nothing to do" >&2
     exit 0
   fi
   if ! provider_available; then
+    if [ "$mode" = "--status" ]; then status_json "uninstalled" "ChatGPT-plan login unavailable" 0 0; exit 0; fi
     echo "Codex not logged in on a ChatGPT plan (no ~/.codex/auth.json chatgpt token) — nothing to meter" >&2
     exit 0
   fi
 
-  read_token || { [ "$mode" = "--update" ] && mark_offline "no token"; exit 1; }
+  read_token || {
+    if [ "$mode" = "--status" ]; then status_json "unknown" "token unavailable" 0 0; exit 0; fi
+    [ "$mode" = "--update" ] && mark_offline "no token"
+    exit 1
+  }
   json=$(fetch_usage) || {
+    if [ "$mode" = "--status" ]; then status_json "unknown" "usage request failed" 0 0; exit 0; fi
     [ "$mode" = "--update" ] && mark_offline "offline"
     die "wham/usage request failed (token expired? endpoint changed? offline?)"
   }
@@ -301,11 +324,26 @@ main() {
   local wins win5h win7d pct5 pct7 h5 h7 na5=0 na7=0
   wins=$(printf '%s' "$json" | jq -c '
       [ .rate_limit.primary_window, .rate_limit.secondary_window ] | map(select(. != null))' 2>/dev/null)
-  win5h=$(printf '%s' "${wins:-[]}" | jq -c 'map(select((.limit_window_seconds // 0) <  86400)) | first // empty' 2>/dev/null)
-  win7d=$(printf '%s' "${wins:-[]}" | jq -c 'map(select((.limit_window_seconds // 0) >= 86400)) | first // empty' 2>/dev/null)
+  # A missing/malformed duration is unknown, not zero seconds. Coercing it to 0
+  # positively misclassified schema drift as cx5h in both --update and --buckets.
+  win5h=$(printf '%s' "${wins:-[]}" | jq -c 'map(select((.limit_window_seconds | type) == "number" and .limit_window_seconds <  86400)) | first // empty' 2>/dev/null)
+  win7d=$(printf '%s' "${wins:-[]}" | jq -c 'map(select((.limit_window_seconds | type) == "number" and .limit_window_seconds >= 86400)) | first // empty' 2>/dev/null)
   if [ -z "$win5h" ] && [ -z "$win7d" ]; then
+    if [ "$mode" = "--status" ]; then status_json "unknown" "no recognized rate-limit windows" 0 0; return; fi
     [ "$mode" = "--update" ] && mark_offline "no data"
     die "wham/usage returned no rate_limit windows (endpoint schema changed?)"
+  fi
+
+  # A live, duration-routed window must carry a numeric used_percent. The old
+  # permissive conversion mapped string/null/missing values to 0%, turning an
+  # upstream schema break into a healthy-looking meter. Treat the whole response
+  # as unknown: the two windows are one account snapshot and stale sibling bars
+  # are more misleading than an explicit no-data state.
+  if { [ -n "$win5h" ] && ! printf '%s' "$win5h" | jq -e '(.used_percent | type) == "number"' >/dev/null 2>&1; } \
+    || { [ -n "$win7d" ] && ! printf '%s' "$win7d" | jq -e '(.used_percent | type) == "number"' >/dev/null 2>&1; }; then
+    if [ "$mode" = "--status" ]; then status_json "unknown" "invalid used_percent" 0 0; return; fi
+    [ "$mode" = "--update" ] && mark_offline "no data"
+    die "wham/usage returned a missing or non-numeric used_percent (endpoint schema changed?)"
   fi
   if [ -n "$win5h" ]; then
     pct5=$(to_pct "$(printf '%s' "$win5h" | jq -r '.used_percent // empty' 2>/dev/null)")
@@ -316,11 +354,16 @@ main() {
     h7=$(humanize_until "$(reset_epoch "$win7d")")
   else na7=1; fi
 
+  if [ "$mode" = "--status" ]; then
+    status_json "available" "" "$((1 - na5))" "$((1 - na7))"
+    return
+  fi
+
   # Which buckets does this account actually HAVE? Consumed by cmux-sentinel-setup.sh
   # so it only creates sentinels for real windows: OpenAI dropped the 5h window for
   # Pro, and a permanently-"n/a" cx5h isn't free — it's an ordinary workspace, so it
   # still eats one of the ⌘1…⌘9 keys to show nothing. Detected, never hardcoded, so
-  # the sentinel comes back on its own if OpenAI restores the window.
+  # setup can recreate the sentinel if OpenAI restores the window.
   #
   # Prints ONLY on the paths that positively parsed a window; every can't-tell path
   # (disabled, not logged in, expired token, offline, schema change) exits earlier
@@ -350,7 +393,7 @@ main() {
     return
   fi
 
-  die "unknown mode: $mode (use --print | --raw | --update | --buckets)"
+  die "unknown mode: $mode (use --print | --raw | --update | --buckets | --status)"
 }
 
 main "$@"

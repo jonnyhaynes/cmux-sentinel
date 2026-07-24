@@ -4,10 +4,10 @@
 # this script must never block Claude, and it has NO cmux dependency.
 #
 # WHY THIS EXISTS: in Zed the user runs each agent as a TERMINAL process (not as a
-# Zed ACP thread). Zed has no writable "workspace title" channel like cmux, but its
-# terminal HONOURS the OSC-2 title escape (`\e]2;…\a`) and shows it on the tab. So
-# agent activity rides a STATIC marker at the FRONT of the terminal-tab title, the
-# same vocabulary as the cmux sidebar:
+# Zed ACP thread). Zed has no writable "workspace title" channel like cmux. Its
+# terminal accepts OSC-2 into breadcrumb metadata, although stock Zed's native tab
+# label remains process-derived. Agent activity still rides a STATIC marker in that
+# terminal metadata and in the JSON sink, using the same vocabulary as cmux:
 #
 #   ⚡  working    — this session is mid-turn
 #   ⏳  compacting — this session is compacting its context (PreCompact→PostCompact)
@@ -21,9 +21,9 @@
 # ~60s AFTER a turn ends is gated out (_notify_waiting checks a live-turn flag).
 #
 # TWO SINKS, independently toggleable:
-#   OSC  (default on; ZED_SENTINEL_OSC=0 to disable) — set the terminal-tab title
-#        on the controlling tty (ZED_SENTINEL_TTY, default /dev/tty). This is the
-#        no-fork path: status shows on the Zed terminal tab today.
+#   OSC  (default on; ZED_SENTINEL_OSC=0 to disable) — set OSC-2 terminal title
+#        metadata on the controlling tty (ZED_SENTINEL_TTY, default /dev/tty).
+#        Stock Zed records it as breadcrumb_text but does not show it in the tab label.
 #   FILE (default on; ZED_SENTINEL_FILE=0 to disable) — write a per-session JSON
 #        status file under ZED_SENTINEL_STATE_DIR. This is the data channel a
 #        future native Zed "Workspaces" panel watches (via Fs::watch) to render a

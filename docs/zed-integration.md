@@ -2,8 +2,9 @@
 
 This repo's Zed pieces (cmux→Zed handoff, agent-state bridge, usage TUI) are **disabled by default**
 so anyone who clones cmux-sentinel and runs `install.sh` gets **zero** Zed behavior. Enable them for
-**yourself only** — nothing here is wired into `install.sh` or the shared `sidebars/workspaces.swift`,
-and you should keep it that way (don't make it the default for other users of the repo).
+**yourself only** — none of it is enabled by `install.sh`'s default path or wired into the shared
+`sidebars/workspaces.swift`, and you should keep it that way (don't make it the default for other
+users of the repo).
 
 ## What's opt-in
 
@@ -13,9 +14,10 @@ and you should keep it that way (don't make it the default for other users of th
 | `bin/cmux-open-in-zed.sh` (`ze`) | Runs only when you invoke it (alias/keybind) | Invoke-only; never fires on its own |
 | `bin/zed-usage-tui.sh` | Runs only when you launch it in a terminal pane | Invoke-only |
 
-A **default** `install.sh` (bare, or the curl one-liner) wires `hooks/cmux-bridge.sh` (the cmux
-bridge) only — it never installs or registers the Zed bridge. The Zed pieces are installed **only**
-when you opt in with `--with-zed` / `WITH_ZED=1` (below), and even then stay inert until `ZED_SENTINEL=1`.
+A **default** `install.sh` (bare, or the curl one-liner) installs no agent-state bridge or hook — it
+never installs or registers the Zed bridge. Claude state uses the separate `--with-bridge` opt-in.
+The Zed pieces are installed **only** when you opt in with `--with-zed` / `WITH_ZED=1` (below), and
+even then stay inert until `ZED_SENTINEL=1`.
 
 ## Easy path — `install.sh --with-zed`
 
@@ -59,12 +61,16 @@ A re-run of a plain `install.sh` (no flag) still refreshes an already-installed 
    (Change the key with `--key '^E'`. The keybind fires only at the shell prompt — never mid-agent.)
 
 3. **Agent-state markers in Zed** (optional) — register `hooks/zed-bridge.sh` for the Claude Code
-   events in your **personal** `~/.claude/settings.json` (UserPromptSubmit, PreToolUse, PreCompact,
-   PostCompact, Notification, Stop, SessionEnd). With `ZED_SENTINEL=1` it writes ⚡/⏳/❓ to the
-   terminal's OSC title and a per-session JSON status file (`ZED_SENTINEL_STATE_DIR`).
+   events in your **personal** `~/.claude/settings.json` (SessionStart, UserPromptSubmit, PreToolUse,
+   PreCompact, PostCompact, Notification, Stop, SessionEnd). With `ZED_SENTINEL=1` it writes
+   ⚡/⏳/❓ to OSC-2 terminal metadata and a per-session JSON status file
+   (`ZED_SENTINEL_STATE_DIR`). Stock Zed records OSC-2 as `breadcrumb_text` but keeps its native tab
+   label process-derived, so the JSON is the durable input for a future panel/status consumer.
 
 4. **Usage meters while in Zed** (optional) — run `bin/zed-usage-tui.sh` in a dedicated Zed terminal
-   pane.
+   pane. It renders each enabled Claude, Codex, or Amp provider whose local credential source is
+   present; every poller keeps its normal `USAGE_PROVIDERS` gate, so disabled providers stay absent
+   and transient failures show `⚠ offline`.
 
 ## Disable
 
