@@ -43,6 +43,14 @@
 # session fires no Stop hook, so its ⚡ lingers until the next turn re-asserts or
 # a real Stop clears it. PID-liveness reaps crashes, not interrupted-alive turns.
 
+# Capability query for adapters that may be newer than the installed bridge. It
+# intentionally runs before the cmux/socket gates and returns a token, not merely
+# exit 0: older bridges ignore unknown events and also exit successfully.
+if [ "${1:-}" = "--capabilities" ]; then
+  printf '%s\n' "protocol=2 stop-failure-final"
+  exit 0
+fi
+
 command -v cmux &>/dev/null || exit 0
 cmux ping &>/dev/null || exit 0
 
@@ -290,6 +298,18 @@ case "$event" in
     cmux set-status "${LOG_SOURCE}_error" "Error: $error" --icon exclamationmark.triangle --color "#FF3B30" &>/dev/null
     cmux notify --title "$AGENT_LABEL Error" --body "$error" &>/dev/null
     cmux log --level error --source "$LOG_SOURCE" -- "Stop failure: $error" &>/dev/null
+    (sleep 60 && cmux clear-status "${LOG_SOURCE}_error" &>/dev/null) &
+    ;;
+
+  StopFailureFinal)
+    # Amp's agent.end(error) is terminal, unlike Claude Code's retryable
+    # StopFailure. Report + clear in ONE ordered bridge process so two detached
+    # adapter calls can never reorder and strand a working marker.
+    error=$(echo "$input" | jq -r '.error // "unknown error"' | head -c 100)
+    cmux set-status "${LOG_SOURCE}_error" "Error: $error" --icon exclamationmark.triangle --color "#FF3B30" &>/dev/null
+    cmux notify --title "$AGENT_LABEL Error" --body "$error" &>/dev/null
+    cmux log --level error --source "$LOG_SOURCE" -- "Stop failure: $error" &>/dev/null
+    _clear_working
     (sleep 60 && cmux clear-status "${LOG_SOURCE}_error" &>/dev/null) &
     ;;
 

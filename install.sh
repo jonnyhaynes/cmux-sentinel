@@ -8,7 +8,7 @@
 set -euo pipefail
 
 # Opt-in features. Accept them as flags AND honour the env form (WITH_BRIDGE /
-# WITH_ZED) — a flag just exports the env so it survives the curl-bootstrap re-exec
+# WITH_ZED / WITH_AMP) — a flag just exports the env so it survives the curl-bootstrap re-exec
 # below (which forwards env, not argv). Everything here is OFF by default, so a plain
 # install / the bare curl one-liner stays cmux-only and Zed-free — other users of the
 # repo are unaffected unless they ask for it.
@@ -153,19 +153,23 @@ echo "  -> $gsplist  (dormant — bootstrap it only if you set GROUP_NAME_SYNC=1
 
 # 5. working-state hooks bridge. Install when explicitly requested (WITH_BRIDGE=1)
 #    OR when one is already present — so a plain re-run still UPDATES an existing
-#    bridge instead of silently leaving it stale. (Without this, a bridge user who
-#    re-runs the bare installer to update would get a new sidebar + poller but a
-#    months-old bridge.) The hooks themselves are registered once in settings.json.
+#    bridge instead of silently leaving it stale. Register hooks only when explicitly
+#    requested or already registered: old Amp-only releases also put their shared
+#    dependency here, and a plain update must not silently opt those users into Claude.
 if [ "${WITH_BRIDGE:-0}" = "1" ] || [ -f "$HOME/.claude/hooks/cmux-bridge.sh" ]; then
   bak "$HOME/.claude/hooks/cmux-bridge.sh"
   install -m 0755 "$here/hooks/cmux-bridge.sh" "$HOME/.claude/hooks/cmux-bridge.sh"
   echo "  -> ~/.claude/hooks/cmux-bridge.sh"
-  # wire the events into settings.json (idempotent) — was the manual step everyone skipped.
-  # The literal ~ is intentional (Claude expands it at hook-exec time), so quote it.
-  # shellcheck disable=SC2088
-  register_hooks '~/.claude/hooks/cmux-bridge.sh' 'cmux-bridge' \
-    SessionStart UserPromptSubmit PreToolUse PreCompact PostCompact \
-    Stop StopFailure Notification PostToolUseFailure SessionEnd
+  if [ "${WITH_BRIDGE:-0}" = "1" ] || grep -q 'cmux-bridge' "$HOME/.claude/settings.json" 2>/dev/null; then
+    # Wire the events into settings.json (idempotent). The literal ~ is intentional
+    # (Claude expands it at hook-exec time), so quote it.
+    # shellcheck disable=SC2088
+    register_hooks '~/.claude/hooks/cmux-bridge.sh' 'cmux-bridge' \
+      SessionStart UserPromptSubmit PreToolUse PreCompact PostCompact \
+      Stop StopFailure Notification PostToolUseFailure SessionEnd
+  else
+    echo "  Claude hooks remain disabled (legacy shared bridge found; use --with-bridge to enable them)"
+  fi
 fi
 
 # 5b. Zed integration (opt-in via --with-zed / WITH_ZED=1). Mirrors the bridge block:
@@ -194,20 +198,20 @@ fi
 #     Amp has no shell hooks — it has a Bun/TypeScript PLUGIN system — so this is
 #     a *.ts file dropped into amp's plugin dir (amp auto-loads every *.ts there;
 #     no manifest, no registration step). It is a thin adapter that shells out to
-#     cmux-bridge.sh, so it REQUIRES that bridge: installing amp support without
-#     it would give a plugin that silently no-ops.
+#     cmux-bridge.sh, so it REQUIRES a neutral copy of that shared dependency.
+#     Keep it outside ~/.claude/hooks: that path is the explicit signal that
+#     Claude integration is enabled, and Amp-only users must not gain Claude
+#     hooks on a later plain installer re-run.
 #
 #     This is NOT a replacement for `cmux hooks amp install` — that one is cmux's
 #     own plugin (native tab-status pills + session restore) and lives alongside
 #     as a separate file. Install BOTH: cmux's for the native UI, this one for the
 #     custom sidebar, which set-status provably cannot reach.
 if [ "${WITH_AMP:-0}" = "1" ] || [ -f "$HOME/.config/amp/plugins/cmux-sentinel-amp.ts" ]; then
-  if [ ! -f "$HOME/.claude/hooks/cmux-bridge.sh" ]; then
-    bak "$HOME/.claude/hooks/cmux-bridge.sh"
-    install -m 0755 "$here/hooks/cmux-bridge.sh" "$HOME/.claude/hooks/cmux-bridge.sh"
-    echo "  -> ~/.claude/hooks/cmux-bridge.sh  (required by the amp plugin)"
-  fi
-  mkdir -p "$HOME/.config/amp/plugins"
+  mkdir -p "$HOME/.config/amp/plugins" "$HOME/.config/cmux-sentinel"
+  bak "$HOME/.config/cmux-sentinel/cmux-bridge.sh"
+  install -m 0755 "$here/hooks/cmux-bridge.sh" "$HOME/.config/cmux-sentinel/cmux-bridge.sh"
+  echo "  -> ~/.config/cmux-sentinel/cmux-bridge.sh  (shared dependency for Amp)"
   bak "$HOME/.config/amp/plugins/cmux-sentinel-amp.ts"
   install -m 0644 "$here/hooks/amp-bridge.ts" "$HOME/.config/amp/plugins/cmux-sentinel-amp.ts"
   echo "  -> ~/.config/amp/plugins/cmux-sentinel-amp.ts"
@@ -228,21 +232,26 @@ cat <<'NEXT'
    To use different labels, set SENTINEL_5H_LABEL / SENTINEL_7D_LABEL in
    ~/.config/cmux/usage-sentinels.env and the matching hasPrefix() in the sidebar.
 
-2. Test the poller:
+2. Inspect and paint every enabled provider (skip the others; setup prints the
+   matching --update commands):
      ~/bin/cmux-claude-usage.sh --print
      ~/bin/cmux-claude-usage.sh --update
+     ~/bin/cmux-codex-usage.sh --print && ~/bin/cmux-codex-usage.sh --update
+     ~/bin/cmux-amp-usage.sh --print && ~/bin/cmux-amp-usage.sh --update
 
 3. Load the sidebar:
-     cmux sidebar validate workspaces && cmux sidebar reload
-   then right-click the sidebar button and pick "workspaces".
+     cmux sidebar validate workspaces && cmux sidebar reload && cmux sidebar select workspaces
 
 4. Enable external socket access for the 5-min auto-refresh — add to ~/.config/cmux/cmux.json:
      "automation": { "socketControlMode": "automation" }
    then run `cmux reload-config` (applies live on current builds). If external socket
    commands still get rejected later, the mode regressed — fully restart cmux.
 
-5. Start the auto-refresh:
+5. Start auto-refresh for every provider you enabled (skip the others; an already
+   loaded job can be left alone):
      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-claude-usage.plist
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-codex-usage.plist
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-amp-usage.plist
 
 6. Verify the whole pipeline:
      ~/bin/cmux-sentinel-doctor.sh        # or, from the repo:  make doctor
@@ -279,8 +288,10 @@ if [ "${ZED_INSTALLED:-0}" = "1" ]; then
 
    Then: (a) RESTART Claude Code so the zed-bridge hook events load; (b) open a new
    shell. Now \`ze\` (or Ctrl-O) opens Zed on the current git worktree, and agent
-   state (⚡ working / ⏳ compacting / ❓ waiting-on-you) rides the terminal title +
-   \$ZED_SENTINEL_STATE_DIR JSON. Without ZED_SENTINEL=1 the bridge is a no-op.
+   state (⚡ working / ⏳ compacting / ❓ waiting-on-you) reaches OSC-2 terminal
+   metadata + \$ZED_SENTINEL_STATE_DIR JSON. Stock Zed's tab label stays
+   process-derived; the JSON is ready for panel/status consumers. Without
+   ZED_SENTINEL=1 the bridge is a no-op.
    Optional: run ~/bin/zed-usage-tui.sh in a Zed terminal pane for the usage meters.
    Full guide + all the toggles: docs/zed-integration.md
 ZED
@@ -292,7 +303,7 @@ if [ "${AMP_INSTALLED:-0}" = "1" ]; then
   cat <<AMP
 
 🔌 Amp bridge installed → ~/.config/amp/plugins/cmux-sentinel-amp.ts
-   Amp picks it up on its next start (or run \`amp plugins reload\`); verify with
+   Restart Amp so it picks up the plugin; verify the file is discovered with
    \`amp plugins list\`. Amp workspaces now show ⚡ working / idle in the sentinel
    sidebar. Two things it deliberately does NOT do: ⏳ compacting (Amp emits no
    such event) and ❓ waiting-on-you (Amp doesn't ask permission by default — opt

@@ -4,13 +4,12 @@ An opinionated [cmux](https://cmux.com) **custom sidebar** — a clean, monospac
 workspaces list with live agent states and pluggable **AI usage meters**.
 
 <p align="center">
-  <img src="assets/sidebar.png" alt="cmux-sentinel sidebar — CLAUDE USAGE meters above the workspace list, a working agent shown in green" width="320">
+  <img src="assets/sidebar.png" alt="cmux-sentinel usage dashboard — humanized Claude, Codex, and Amp meters" width="320">
 </p>
 
-The top **USAGE** panel shows live Claude limits (5h session + 7d weekly) with smooth sub-cell
-bars — a 🟡/🔴 dot appears only when a limit gets close — and workspace rows light up by agent
-state: **purple** (compacting) / **green** (working) / **orange** (needs you — including when an
-agent asks a question or hits a permission prompt) / dim (idle).
+The top usage panels show live Claude, Codex, and Amp allowances with native progress bars (plus a
+title fallback) and compact countdowns such as `28% (1h 54m)`. Workspace rows use a quiet state hierarchy: **purple**
+(compacting), **green** (working), **orange** (needs you), selected blue, and neutral idle.
 
 It's a vibe-coded [custom sidebar](https://cmux.com/docs/custom-sidebars) (beta) plus small
 background pollers. Batteries included, easy to fork and tweak.
@@ -18,22 +17,22 @@ background pollers. Batteries included, easy to fork and tweak.
 ## Features
 
 - **Flat workspace list** in your manual order, SF Mono, Ayu-Mirage palette.
-- **Live agent row states** (via a Claude Code hooks bridge): `compacting` (purple), `working`
+- **Live agent row states** (via Claude Code hooks or the Amp plugin): `compacting` (purple), `working`
   (green), `needs you` (orange — unread, or the agent asked a question / hit a permission prompt),
-  `idle` (dim) — shown by row colour with a two-line subtitle that keeps agent activity separate
-  from repo state (branch · dirty · PR). The header shows live per-state counts.
-- **Inline actions**: click to select, `×` to close, unread badges.
+  and `idle` (dim). Idle repo rows omit redundant `idle`; active rows keep activity and repo state
+  separate. The header shows action-needed first, then working and compacting counts.
+- **Inline actions**: click to select, an always-visible high-contrast `×` to close, pin indicators,
+  unread badges, and honest `⌘N` hints that preserve cmux's real shortcut gaps.
 - **Workspace-group names** (opt-in) — cmux gives custom sidebars no group data, so a group shows
   its anchor's generic "Group 2" instead of its real name. A small background sync
   (`GROUP_NAME_SYNC=1`) keeps each group's anchor title in step with the group name (see "Workspace
   group names" below). Off by default; a no-op if you don't use groups.
-- **Usage meters** — a top panel of live progress bars fed by background pollers. Ships with two
-  providers — **Claude Code** (rolling 5-hour session + 7-day weekly, via the OAuth usage endpoint)
-  and **Codex** (the same two windows, read from local `~/.codex` rollout files — no token, no
-  network) — each with a smooth sub-cell Unicode bar, a `🟡`/`🔴` dot only when a limit gets close,
-  and an `⚠ offline`/`⚠ stale` marker when data goes stale. Providers are opt-in and self-gating:
-  an out-of-the-box install shows **Claude only**, and a provider that isn't installed can never
-  appear or crash anything (see "Usage meters" below).
+- **Usage meters** — provider-labelled native progress bars fed by background pollers. Ships with
+  **Claude Code** (5-hour session + 7-day week), **Codex** (whatever short/weekly windows the account
+  currently reports), and **Amp** (monthly thread allowance plus opt-in orb allowance). The title
+  remains a restart-proof anchor and fallback. Providers are opt-in and self-gating: the default
+  provider set is **Claude only**, and an unavailable provider's poller exits cleanly. Panels are
+  controlled separately by sentinel presence (see "Usage meters" below).
 
 **Roadmap / help wanted:** more usage-meter providers — anything else that exposes a usage signal.
 The meter mechanism is provider-agnostic (see "Usage meters" below), so adding one is mostly a
@@ -47,25 +46,25 @@ cmux custom sidebars are runtime-interpreted SwiftUI-style files. The sidebar ca
 fixed set of per-workspace fields — it **cannot** fetch URLs or read arbitrary data. Two
 mechanisms feed it:
 
-1. **Agent row states** — Claude Code hooks → `hooks/cmux-bridge.sh` → a STATIC marker on the
+1. **Agent row states** — Claude Code hooks or `hooks/amp-bridge.ts` → `hooks/cmux-bridge.sh` → a STATIC marker on the
    *active* workspace's **title** (`⚡` working, `⏳` compacting, `❓` waiting-on-you — an agent that
    asked a question or hit a permission prompt), reference-counted so multiple agents in one
    workspace don't stomp it and dead sessions can't strand it. Precedence is compacting > waiting >
    working. The sidebar detects the marker, colours the row, and strips the glyph for display.
-   (Why the title and not
-   `set-progress`: progress doesn't reach custom-sidebar data on this build — see gotchas — and
-   the marker must be *static*, since an animated one freezes cmux's sidebar.)
+   Agent state stays in the title because it must survive app/process boundaries and be shared by
+   co-tenant agents; an animated marker would freeze cmux's title coalescer.
 2. **Usage meters** — a poller (run by launchd every few minutes) computes each metric and writes
-   it into a dedicated idle **"sentinel" workspace** by **renaming its title** (the same title
-   channel). The sidebar matches sentinels by their **title label** (`5h`/`7d` prefix) and renders their
-   titles in the top `USAGE` panel, hidden from the list. (cmux removed stable workspace ids in
-   0.64.15, so the poller re-resolves each sentinel by title every run — restart-proof.)
+   it into a dedicated idle **"sentinel" workspace** using both `set-progress` (the native bar and
+   label) and a title rename (stable anchor + fallback). The sidebar matches sentinels by title
+   label, hides them from the workspace list, and humanizes those labels for display. cmux removed
+   stable workspace ids in 0.64.15, so every poll re-resolves the live title across all windows.
 
 ```text
 launchd ──► bin/cmux-claude-usage.sh --update
-              ├─ read OAuth token ← macOS Keychain ("Claude Code-credentials")
+              ├─ read OAuth token ← Claude-owned Keychain item or credentials JSON
               ├─ GET api.anthropic.com/api/oauth/usage   (5h + 7d utilization + reset times)
-              └─ cmux rename-workspace <sentinel> "5h ██▍░░░░░░░ 24% 2d18h" ─► sidebar reads w.title
+              ├─ cmux rename-workspace <sentinel> "5h |24% (2h 18m)|███░…" (anchor/fallback)
+              └─ cmux set-progress 0.24 --label "24% (2h 18m)" (native bar)
 ```
 
 ---
@@ -90,7 +89,7 @@ Rules:
   (e.g. merging the hooks block into ~/.claude/settings.json), don't ask me to.
 - When done, run ~/bin/cmux-sentinel-doctor.sh and show me the output. If a check
   isn't green, fix it per the guide and re-run the doctor until it's clean.
-- Stop and ask me only if cmux isn't installed/running or Claude Code isn't logged in.
+- Stop and ask me only if cmux isn't installed/running or a required dependency is missing.
 - After registering hooks, remind me to fully restart Claude Code.
 ```
 
@@ -116,26 +115,39 @@ cd cmux-sentinel
                              # add --with-zed  (or WITH_ZED=1) for the opt-in Zed integration
 ```
 
+| Integration | Flag/config | Effect |
+| --- | --- | --- |
+| Claude states | `--with-bridge` / `WITH_BRIDGE=1` | Installs the shared bridge under `~/.claude/hooks` and registers Claude Code events |
+| Amp states | `--with-amp` / `WITH_AMP=1` | Installs the Amp plugin plus its neutral shared dependency under `~/.config/cmux-sentinel` |
+| Zed | `--with-zed` / `WITH_ZED=1` | Installs and registers the opt-in Zed helpers |
+| Usage providers | `USAGE_PROVIDERS` | Chooses `claude`, `codex`, and/or `amp` meter pollers; default is `claude` |
+
+Amp-only installation does **not** register Claude hooks. If both agents are enabled, they still use
+the same ref-counted state model so one agent ending cannot clear another agent's active marker.
+
 `install.sh` copies the files into place (backing up anything it overwrites) and prints the
 remaining manual steps. In short:
 
 1. **Create the sentinel workspaces.** Easiest — run `~/bin/cmux-sentinel-setup.sh`: it creates the
-   meter workspaces for your enabled providers (idempotent, names + describes them, and warns if
-   cmux's global auto-naming could rename them). Or by hand: create idle workspaces and name them so
+   meter workspaces for your enabled providers (idempotent, skips positively absent provider
+   windows, keeps Amp orbs opt-in, and warns if cmux's global auto-naming could rename them). Or by
+   hand: create idle workspaces and name them so
    their **titles start with the labels** — no ids to copy (cmux 0.64.15 dropped stable workspace
    UUIDs, so the poller + sidebar match by title): `cmux rename-workspace --workspace workspace:<N>
    "5h"` (one for `5h`, one for `7d`). To use different labels, set `SENTINEL_5H_LABEL` /
    `SENTINEL_7D_LABEL` in `~/.config/cmux/usage-sentinels.env` and the matching `hasPrefix()` in the
    sidebar's `isClaudeMeter()`. (Sentinels can live in any window — the poller scans all windows —
    but keep them in the window where the sidebar is shown, since the sidebar renders per-window.)
-2. **Test the poller:** `~/bin/cmux-claude-usage.sh --print` then `--update`.
-3. **Load the sidebar:** `cmux sidebar validate workspaces && cmux sidebar reload`, then
-   right-click the sidebar button and pick *workspaces*.
+2. **Test and paint enabled providers:** run each enabled provider's poller with `--print`, then
+   `--update`. The setup script prints the exact update commands for the configured provider set.
+3. **Load the sidebar:** `cmux sidebar validate workspaces && cmux sidebar reload && cmux sidebar
+   select workspaces`.
 4. **Enable external socket access** for auto-refresh — add
    `"automation": { "socketControlMode": "automation" }` to `~/.config/cmux/cmux.json`, then run
    `cmux reload-config` (applies live on current builds; if renames still get rejected, restart cmux).
-5. **Start auto-refresh:**
-   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-claude-usage.plist`.
+5. **Start auto-refresh:** bootstrap the matching launchd plist for each enabled provider if it is
+   not already loaded: `com.cmux-claude-usage.plist`, `com.cmux-codex-usage.plist`, and/or
+   `com.cmux-amp-usage.plist` under `~/Library/LaunchAgents/`.
 6. **Verify the pipeline:** `make doctor` (or `~/bin/cmux-sentinel-doctor.sh`) — a read-only check
    that the bridge, hooks, launchd job, automation mode, and sentinels are all wired.
 
@@ -170,17 +182,27 @@ Code:
 `Notification` drives `❓ waiting-on-you` (permission prompts); `UserPromptSubmit`/`PreToolUse`
 drive `⚡ working`; `PreCompact`/`PostCompact` drive `⏳ compacting`; `Stop`/`SessionEnd` clear it.
 
+### Amp working-state rows (opt-in)
+
+`./install.sh --with-amp` installs `~/.config/amp/plugins/cmux-sentinel-amp.ts` and the neutral
+bridge dependency it calls. Amp provides working/idle state; it has no compaction event, and
+waiting-on-you is off unless you explicitly set `CMUX_SENTINEL_AMP_ASK=1` (which changes Amp to ask
+before configured tools). Also run `cmux hooks amp install` for cmux's separate native-sidebar
+integration; the two plugins coexist and serve different sidebars.
+
 ### Using Zed alongside cmux (opt-in, off by default)
 
 If you keep cmux for terminals/agents but reach for [Zed](https://zed.dev) as your editor + git UI,
 `install.sh --with-zed` (or `WITH_ZED=1 ./install.sh`) adds three personal helpers: a **cmux→Zed
 worktree handoff** (`ze` / `Ctrl-O` opens Zed on the current git worktree — no window-switching and
-project/worktree re-picking), the same **agent-state markers** (`⚡`/`⏳`/`❓`) mirrored to Zed's
-terminal-tab title + a JSON status sink, and a **usage-meter pane** for Zed's terminal. It's wired
+project/worktree re-picking), the same **agent-state markers** (`⚡`/`⏳`/`❓`) written to OSC-2
+terminal metadata + a JSON status sink, and a **usage-meter pane** for Zed's terminal. Stock Zed's
+native tab label remains process-derived; the JSON is the durable input for a future panel. It's wired
 into nothing until you `export ZED_SENTINEL=1`, so a default install stays Zed-free and other users
 of this repo are unaffected. Full setup and every toggle: [`docs/zed-integration.md`](docs/zed-integration.md).
 
-**Prereqs:** macOS, cmux (custom sidebars / beta), Claude Code logged in, `jq`, `curl`, `git`.
+**Prereqs:** macOS, cmux (custom sidebars / beta), `jq`, `curl`, and `git`. Provider-specific meters
+also require that provider's CLI/account credentials.
 
 ## Updating
 
@@ -207,24 +229,25 @@ Then `cmux sidebar reload` to repaint. Notes:
 
 ## Usage meters (providers)
 
-Each provider gets its **own labelled section** in the panel — `CLAUDE USAGE` and `CODEX USAGE` —
-the same component reused. A meter is just an idle "sentinel" workspace whose **title** a poller
-keeps updated.
+Each provider gets its own labelled section — `CLAUDE USAGE`, `CODEX USAGE`, and `AMP USAGE` —
+using the same component. Internal title anchors (`5h`, `cx7d`, `ampu`) are displayed as human labels
+such as `session`, `week`, and `threads`. A meter is an idle sentinel workspace whose poller writes
+both a native progress value and a restart-safe title fallback.
 
-### Choosing which providers show (and never crashing on a missing one)
+### Choosing which providers show (without crashing on a missing one)
 
 The sidebar can't read a config file — it can only react to workspace data — so **which providers
 show is decided by which sentinels exist**, and the sidebar **auto-hides any provider with zero
 sentinels** (each panel is guarded by a `count > 0`). That makes provider selection a setup choice,
 not a sidebar edit, and gives three robustness guarantees:
 
-- **A provider you don't use never appears.** No Codex poller + no Codex sentinels ⇒ no Codex panel.
-  (So an out-of-the-box install is **Claude-only** — exactly what most people want.)
+- **A provider with no sentinels never appears.** No Codex sentinels ⇒ no Codex panel. The default
+  provider set is **Claude-only**; running setup creates only its normal sentinels.
 - **An *uninstalled* provider can't break anything.** Each poller **self-gates**: if its provider
   isn't installed here (e.g. no Claude credentials in the Keychain *or* `~/.claude/.credentials.json`)
-  it **exits 0 silently** — no launchd error spam, no stale "offline" panel. The sidebar itself only
-  ever reads titles, so it can't crash on a missing CLI either. An *expired* token is different — the
-  creds still exist, so it's treated as a transient `⚠ offline` rather than "not installed".
+  it **exits 0 silently**, so there is no launchd error spam. It does not delete sentinels: an
+  existing panel remains until those workspaces are closed, and doctor calls that out. An *expired*
+  token is different — credentials still exist, so it is treated as transient `⚠ offline`.
 - **You can disable a provider you *do* have installed.** Set `USAGE_PROVIDERS` in
   `~/.config/cmux/usage-sentinels.env` (space-separated; default `claude`). Drop a name to make that
   poller a no-op without unloading launchd; then `cmux workspace close` its sentinels to remove the
@@ -239,7 +262,7 @@ Codex ships built-in but is **off by default** (out-of-the-box is Claude-only). 
    e.g. `USAGE_PROVIDERS="claude codex"` (or just `"codex"` to disable Claude). With the name
    absent the Codex poller is a no-op, so this is the on/off switch.
 2. **Create the sentinels:** re-run `~/bin/cmux-sentinel-setup.sh` (it now creates `cx5h`/`cx7d`
-   too, since codex is enabled), or by hand:
+   only for windows the account positively reports; the poller fails open when it cannot tell), or by hand:
    `cmux rename-workspace --workspace workspace:<N> "cx5h"` (one for `cx5h`, one for `cx7d`).
    Override `SENTINEL_CX5H_LABEL` / `SENTINEL_CX7D_LABEL` in the env file if you want different
    labels (match them in the sidebar's `isCodexMeter()`).
@@ -248,13 +271,27 @@ Codex ships built-in but is **off by default** (out-of-the-box is Claude-only). 
    (dormant). Just load it: `launchctl bootstrap gui/$(id -u)
    ~/Library/LaunchAgents/com.cmux-codex-usage.plist`.
 
-`~/bin/cmux-sentinel-doctor.sh` cross-checks installed × enabled × sentinel-present for both
-providers. If Codex isn't installed (`codex` not on PATH and no `~/.codex/sessions`), the poller
-exits cleanly and no panel shows.
+`~/bin/cmux-sentinel-doctor.sh` cross-checks installed × enabled × sentinel-present across every
+cmux window. Codex requires a ChatGPT login in `~/.codex/auth.json`; API-key logins are not covered
+by this account-usage endpoint.
+
+### Enable the Amp provider
+
+1. Add `amp` to `USAGE_PROVIDERS` (for example `"claude codex amp"`).
+2. Run `~/bin/cmux-sentinel-setup.sh`; it creates `ampu` for monthly thread usage.
+3. Test with `~/bin/cmux-amp-usage.sh --print`, then `--update`.
+4. Load it if needed: `launchctl bootstrap gui/$(id -u)
+   ~/Library/LaunchAgents/com.cmux-amp-usage.plist`.
+
+Amp's source is the prose output from `amp usage` (there is no JSON mode). The poller anchors on
+the phrases `other usage` and `orb usage`, converts Amp's **remaining** percentages to **used**, and
+marks unparseable output as no data rather than fabricating 0%. Orb metering is deliberately off by
+default because its sentinel consumes a workspace shortcut slot; set `AMP_ORB_METER=1` and re-run
+setup only if you use orbs.
 
 ### Add a NEW provider
 
-The two built-in providers (Claude, Codex) are the template. To add a third:
+The three built-in providers (Claude, Codex, Amp) are the template. To add a fourth:
 
 1. Create a sentinel workspace with a distinct label (a prefix that can't collide with the others).
    In `sidebars/workspaces.swift`: add an `isXMeter(w)` predicate (copy `isCodexMeter`, swap the
@@ -263,30 +300,27 @@ The two built-in providers (Claude, Codex) are the template. To add a third:
 2. Write a small poller (copy `bin/cmux-codex-usage.sh` or `cmux-claude-usage.sh`) — keep the
    self-gating pattern: a `provider_available()` (detect the provider's creds/CLI/data) + a
    `PROVIDER_ID` checked against `USAGE_PROVIDERS`, so it exits cleanly when the provider is absent
-   or disabled. It computes usage and does
-   `cmux rename-workspace --workspace <ref> "<label> <bar> <pct>% <reset>"`.
+   or disabled. It computes usage, renames the title to
+   `"<label> |<pct>% (<reset>)|<bar>"` as the anchor/fallback, and calls `cmux set-progress` for the
+   native value bar and compact label.
 3. Schedule it (launchd) like the others. Users who want it run its poller; users who don't, don't.
 
 PRs adding providers are very welcome.
 
 ### Codex provider — data source
 
-Codex writes a per-turn rate-limit snapshot into its **local** session rollout files — no token, no
-network:
+Codex uses ChatGPT's `wham/usage` endpoint with the OAuth token and account id from
+`~/.codex/auth.json` (the token is read fresh and never printed). This is the same account-server
+source the Codex CLI polls; the older local rollout-file source no longer updates reliably for
+`codex exec` sessions. Current Codex also exposes a structured `account/rateLimits/read` app-server
+RPC, but adopting it here would add a daemon/protocol lifecycle around the same backend source;
+the dependency-light shell poller therefore keeps the direct request and defensive validation.
+See [`docs/usage-data-source-research.md`](docs/usage-data-source-research.md) for the source audit.
 
-```text
-~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<uuid>.jsonl
-  └─ a "rate_limits" object: { primary: {used_percent, window_minutes:300,   resets_at},
-                               secondary:{used_percent, window_minutes:10080, resets_at} }
-```
-
-`primary` = the rolling 5-hour window, `secondary` = the weekly window — the same two the Claude
-meter shows. The poller scans the newest rollout files and takes the **latest non-null** snapshot
-(Codex frequently writes `rate_limits: null`, especially in `codex exec`/non-interactive runs —
-[openai/codex#14880](https://github.com/openai/codex/issues/14880)); if none is found it stamps
-`⚠ stale`. This schema is **community-observed, not an OpenAI contract**, so the poller parses
-defensively (recursive search for `rate_limits`, tolerant of missing keys, accepts `resets_at` or
-`resets_in_seconds`).
+The response's `primary_window`/`secondary_window` positions are not stable. The poller routes only
+windows with a numeric `limit_window_seconds`: under one day to `cx5h`, one day or more to `cx7d`.
+Some plans currently have no short window, so setup skips that sentinel on a positive answer.
+Malformed/unknown durations are never guessed as a 5-hour bucket.
 
 ### Claude provider — data source
 
@@ -300,7 +334,7 @@ Unofficial / beta (the same endpoint `ccusage statusline` uses; header may chang
 `five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`, … each `{ utilization: 0-100,
 resets_at }`. Use `seven_day.resets_at` for the weekly reset — Anthropic's 7-day window **rolls**,
 so local calendar-week math (`ccusage weekly`) is wrong. Token is read fresh from the macOS
-Keychain each run; never stored or printed.
+Keychain or `~/.claude/.credentials.json` each run; never copied into this repo or printed.
 
 ---
 
@@ -327,62 +361,55 @@ it doesn't churn cmux's title coalescer). It's **opt-in** and a no-op until you 
 
 It's multi-window aware (groups are window-scoped; launchd has no window context) and needs no
 credentials or network. `~/bin/cmux-sentinel-doctor.sh` reports whether it's enabled, loaded, and
-whether any anchors are out of sync. (If cmux ever exposes group data to the sidebar, this can
-retire — tracked in `.claude/research/2026-06-19-workspace-group-names-in-sidebar.md`.)
+whether any anchors are out of sync. If cmux exposes group data to custom sidebars later, the sync
+bridge can retire.
 
 ---
 
 ## Interpreter gotchas
 
-The cmux sidebar runs a **subset** of SwiftUI. Hard-won facts (respect these in PRs):
-
-- **`set-progress` / `description` / `color` do NOT reach custom-sidebar data at all** — not even
-  for the selected, working workspace (proven by probe). **`title` is the only writable channel**, so
-  usage bars AND the agent working/compacting markers all ride the title string. (`cmux sidebar-state`
-  shows the canonical store and diverges from what the sidebar actually sees — don't trust it to
-  predict the sidebar.)
-- **String `.hasPrefix` / `.contains` / `.split` DO work** here — the marker detection relies on
-  them. (An older note claimed they blank-render; that was disproven on the current build.) `==`
-  works too. Avoid `||`; use an `if`-chain returning early.
-- **No value-accurate native bar** (`ProgressView`/`Capsule`) for meters — a drawn bar needs the %
-  as a number, but you only have it as a string in the title and the interpreter can't reliably
-  parse it back. Hence Unicode block text bars. Likewise utilization **color** can only come from a
-  colored emoji in the title.
-- `Divider().background(...)` and `.frame(maxHeight: .infinity)` are **greedy** and wreck row
-  height. `.contentShape(Rectangle())` is a no-op. Custom fonts aren't honored — use
-  `.system(size:, design: .monospaced)`.
-- `cmux sidebar validate` only **parses**; it passes on layouts that render blank. Bisect runtime
-  errors by stripping the body to `Text("hi")` and adding back piece by piece.
-
-The full, standalone version of these traps (plus the blank-sidebar debugging method) lives in
-[docs/cmux-custom-sidebar-cheatsheet.md](docs/cmux-custom-sidebar-cheatsheet.md) — a one-screen field
-guide that complements cmux's official [authoring reference](https://cmux.com/docs/custom-sidebars).
+The cmux sidebar runs an interpreted **subset** of SwiftUI, and parser success does not prove a live
+render. The canonical, build-verified list of supported data channels, language traps, greedy
+modifiers, and the blank-sidebar bisect method is
+[`docs/cmux-custom-sidebar-cheatsheet.md`](docs/cmux-custom-sidebar-cheatsheet.md). Keep README and
+contributor notes concise; update that cheatsheet when a probe changes an interpreter fact. The
+current validation ceiling and upstream implementation evidence are recorded in
+[`docs/sidebar-render-validation.md`](docs/sidebar-render-validation.md).
 
 ## Layout
 
 ```text
 bin/cmux-claude-usage.sh     Claude usage poller — OAuth usage endpoint (--print | --raw | --update)
-bin/cmux-codex-usage.sh      Codex usage poller — local ~/.codex rollout files (--print | --raw | --update)
+bin/cmux-codex-usage.sh      Codex usage poller — ChatGPT wham/usage endpoint (--print | --raw | --update | --buckets | --status)
+bin/cmux-amp-usage.sh        Amp monthly-allowance poller — `amp usage` parser (--print | --raw | --update | --buckets)
 bin/cmux-sentinel-setup.sh   idempotently create the meter sentinel workspaces (+ auto-naming guard)
 bin/cmux-group-sync.sh       workspace-group name → anchor-title sync (opt-in; --list | --raw | --update)
-bin/cmux-sentinel-doctor.sh  read-only health-check of the whole pipeline (both providers + snapshot)
+bin/cmux-sentinel-doctor.sh  read-only, multi-window health-check of the whole pipeline
 sidebars/workspaces.swift    the sidebar (the opinionated design + USAGE panels)
-hooks/cmux-bridge.sh         Claude Code → cmux agent-state bridge (⚡ working / ⏳ compacting / ❓ waiting-on-you)
+hooks/cmux-bridge.sh         shared ref-counted agent-state bridge
+hooks/amp-bridge.ts          Amp plugin adapter → shared bridge
 tests/bridge-state.sh        offline bridge state-machine test (stubs cmux; `make test`)
 tests/poller-gate.sh         offline Claude poller gating + clamping + bare-label + multi-window
-tests/codex-poller.sh        offline Codex poller gating + rollout-parsing + clamping + multi-window
+tests/codex-poller.sh        offline Codex endpoint parsing + duration routing + multi-window
+tests/amp-poller.sh          offline Amp prose parsing + remaining→used inversion + orb opt-in
+tests/amp-bridge.sh          shared bridge behavior + Amp adapter contracts
 tests/install-hooks.sh       offline install.sh hook-registration test
 tests/sentinel-setup.sh      offline cmux-sentinel-setup.sh test
+tests/sentinel-doctor.sh     offline multi-window health-check + provider diagnostics
 tests/group-sync.sh          offline group-sync gating + rename + marker-preserve + multi-window
-examples/                    usage-sentinels.env + launchd plist templates (Claude + Codex + group-sync)
+tests/zed-bridge.sh          offline OSC/JSON state bridge tests
+tests/open-in-zed.sh         offline worktree-aware Zed handoff tests
+tests/usage-tui.sh           offline provider/rendering tests for the Zed usage TUI
+examples/                    usage-sentinels.env + launchd templates (Claude + Codex + Amp + group-sync)
 install.sh                   file placement + next-steps
 ```
 
 ## Security
 
-The OAuth token is read fresh from the macOS Keychain on every poll and sent only to
-`api.anthropic.com` — never written to disk, logged, or printed. Nothing in this repo contains a
-token; sentinel UUIDs are placeholders you fill in locally.
+OAuth tokens are read fresh from provider-owned local credential stores and sent only to their
+provider usage endpoints; they are never printed or copied into this repo. Amp's `--raw` mode can
+include the signed-in email and is explicitly local-only. Sentinels store no ids or secrets: they
+are resolved from title labels every run.
 
 ## Contributing
 

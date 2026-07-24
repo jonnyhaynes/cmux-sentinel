@@ -117,6 +117,23 @@ func activityIcon(_ w) -> String {
   if needsYou(w) { return "bell.fill" }
   return ""
 }
+// Idle repo rows already communicate useful state below the title; repeating
+// literal "idle" makes the list taller without adding information. Keep it only
+// for empty rows, while all actionable/active states always get an activity line.
+func showsActivity(_ w) -> Bool {
+  if isCompacting(w) { return true }
+  if isWorking(w) { return true }
+  if needsYou(w) { return true }
+  if hasRepoInfo(w) { return false }
+  return true
+}
+func titleLineLimit(_ w) -> Int {
+  if w.selected { return 2 }
+  if isCompacting(w) { return 2 }
+  if isWorking(w) { return 2 }
+  if needsYou(w) { return 2 }
+  return 1
+}
 
 // ── dimension 2: repo / git state ─────────────────────────────────
 func hasRepoInfo(_ w) -> Bool {
@@ -158,13 +175,13 @@ func isClaudeMeter(_ w) -> Bool {
   return false
 }
 // Codex provider — same shape as isClaudeMeter, distinct labels so the two never
-// collide ("cx5h"/"cx7d" never start with "5h "/"7d "). Fed by bin/cmux-codex-usage.sh,
-// which reads ~/.codex rate_limits (primary=5h, secondary=weekly).
+// collide. bin/cmux-codex-usage.sh reads ChatGPT account usage and routes windows
+// by numeric duration (never by unstable primary/secondary position).
 func isCodexMeter(_ w) -> Bool {
   if w.title == "cx5h" { return true }           // bare bootstrap label
-  if w.title.hasPrefix("cx5h ") { return true }  // Codex — 5h window (primary)
+  if w.title.hasPrefix("cx5h ") { return true }  // Codex — short/session window
   if w.title == "cx7d" { return true }           // bare bootstrap label
-  if w.title.hasPrefix("cx7d ") { return true }  // Codex — weekly window (secondary)
+  if w.title.hasPrefix("cx7d ") { return true }  // Codex — weekly window
   return false
 }
 // Amp provider — fed by bin/cmux-amp-usage.sh, which scrapes `amp usage`.
@@ -195,10 +212,20 @@ func isUsageMeter(_ w) -> Bool {
 // stays the anchor (isClaudeMeter/resolve_ref) AND the fallback shown here
 // whenever progress is absent (bootstrap, offline-cleared, a dropped write, or
 // the first poll after an app restart).
-func meterWindow(_ w) -> String {   // leading token of the title: "5h"/"7d"/"cx5h"/"cx7d"
-  let parts = w.title.split(separator: " ")
-  if parts.count > 0 { return String(parts[0]) }
-  return w.title
+func meterWindow(_ w) -> String {   // human label; title anchor remains unchanged
+  if w.title == "5h" { return "session" }
+  if w.title.hasPrefix("5h ") { return "session" }
+  if w.title == "7d" { return "week" }
+  if w.title.hasPrefix("7d ") { return "week" }
+  if w.title == "cx5h" { return "session" }
+  if w.title.hasPrefix("cx5h ") { return "session" }
+  if w.title == "cx7d" { return "week" }
+  if w.title.hasPrefix("cx7d ") { return "week" }
+  if w.title == "ampu" { return "threads" }
+  if w.title.hasPrefix("ampu ") { return "threads" }
+  if w.title == "ampo" { return "orbs" }
+  if w.title.hasPrefix("ampo ") { return "orbs" }
+  return "usage"
 }
 func meterTint(_ w) -> String {     // color-from-data: red ≥90%, amber ≥70%, else blue
   if hasProgress(w) {
@@ -206,6 +233,26 @@ func meterTint(_ w) -> String {     // color-from-data: red ≥90%, amber ≥70%
     if w.progress.value >= 0.7 { return "#FFCC66" }
   }
   return "#73D0FF"
+}
+// Poller title fallback protocol: "<anchor> |<detail>|<unicode bar>". The space
+// before the first delimiter preserves every existing "<label> " identity match;
+// the single-character split avoids provider-specific prefix parsing entirely.
+// Old pre-protocol titles show "refreshing…" until the next poll migrates them.
+func meterFallbackDetail(_ w) -> String {
+  if w.title == "5h" { return "waiting…" }
+  if w.title == "7d" { return "waiting…" }
+  if w.title == "cx5h" { return "waiting…" }
+  if w.title == "cx7d" { return "waiting…" }
+  if w.title == "ampu" { return "waiting…" }
+  if w.title == "ampo" { return "waiting…" }
+  let parts = w.title.split(separator: "|")
+  if parts.count > 1 { return String(parts[1]) }
+  return "refreshing…"
+}
+func meterFallbackBar(_ w) -> String {
+  let parts = w.title.split(separator: "|")
+  if parts.count > 2 { return String(parts[2]) }
+  return ""
 }
 func meterRow(_ w) -> some View {
   VStack(alignment: .leading, spacing: 3) {
@@ -217,12 +264,24 @@ func meterRow(_ w) -> some View {
         if hasProgressLabel(w) {
           Text(w.progress.label)
             .font(.system(size: 11, design: .monospaced)).foregroundColor("#8A9199")
+            .lineLimit(1).truncationMode(.tail).multilineTextAlignment(.trailing)
         }
       }
       ProgressView(value: w.progress.value).tint(meterTint(w))
     } else {
-      Text(w.title)   // fallback: title still carries the unicode-bar text
-        .font(.system(size: 12, design: .monospaced)).foregroundColor("#CCCAC2")
+      HStack(spacing: 6) {
+        Text(meterWindow(w))
+          .font(.system(size: 12, design: .monospaced)).foregroundColor("#CCCAC2")
+        Spacer()
+        Text(meterFallbackDetail(w))
+          .font(.system(size: 11, design: .monospaced)).foregroundColor("#8A9199")
+          .lineLimit(1).truncationMode(.tail).multilineTextAlignment(.trailing)
+      }
+      if meterFallbackBar(w) != "" {
+        Text(meterFallbackBar(w))
+          .font(.system(size: 11, design: .monospaced)).foregroundColor("#73D0FF")
+          .lineLimit(1)
+      }
     }
   }
 }
@@ -246,7 +305,7 @@ func shortcutDigit(_ w) -> Int {
   return 0
 }
 func shortcutLabel(_ w) -> String {
-  if shortcutDigit(w) > 0 { return "\(shortcutDigit(w))" }
+  if shortcutDigit(w) > 0 { return "⌘\(shortcutDigit(w))" }
   return ""
 }
 
@@ -266,17 +325,20 @@ func accentOpacity(_ w) -> Double {
 }
 func rowFill(_ w) -> String {
   if w.selected { return "#33415E" }
-  if isCompacting(w) { return "#DFBFFF" }
-  if isWorking(w) { return "#87D96C" }
   if needsYou(w) { return "#FFCC66" }
-  return "#000000"
+  return "#FFFFFF"
 }
 func rowFillOpacity(_ w) -> Double {
   if w.selected { return 0.85 }
-  if isCompacting(w) { return 0.12 }
-  if isWorking(w) { return 0.12 }
-  if needsYou(w) { return 0.08 }
-  return 0.06
+  if needsYou(w) { return 0.10 }
+  if isCompacting(w) { return 0.035 }
+  if isWorking(w) { return 0.035 }
+  return 0.025
+}
+func closeColor(_ w) -> String {
+  if w.selected { return "#FFFFFF" }
+  if needsYou(w) { return "#FFCC66" }
+  return "#A7AFBD"
 }
 
 func row(_ w) -> some View {
@@ -290,23 +352,30 @@ func row(_ w) -> some View {
         // (shortcutLabel == ""), and dim on purpose — it's a lookup aid, not state.
         Text(shortcutLabel(w))
           .font(.system(size: 11, design: .monospaced))
-          .foregroundColor(w.selected ? "#8A9199" : "#6E7787")
-          .frame(width: 9)
+          .foregroundColor(w.selected ? "#D9D7CE" : "#707A8C")
+          .frame(width: 20)
         VStack(alignment: .leading, spacing: 2) {
-          Text(displayTitle(w))
-            .font(.system(size: 14, design: .monospaced))
-            .fontWeight(w.selected ? .bold : .medium)
-            .foregroundColor(w.selected ? "#FFFFFF" : "#D9D7CE")
-            .lineLimit(2).multilineTextAlignment(.leading)
-          // dimension 1 — agent activity
           HStack(spacing: 5) {
-            if activityIcon(w) != "" {
-              Image(systemName: activityIcon(w)).font(.system(size: 9)).foregroundColor(activityColor(w))
+            Text(displayTitle(w))
+              .font(.system(size: 14, design: .monospaced))
+              .fontWeight(w.selected ? .bold : .medium)
+              .foregroundColor(w.selected ? "#FFFFFF" : "#D9D7CE")
+              .lineLimit(titleLineLimit(w)).multilineTextAlignment(.leading)
+            if w.pinned {
+              Image(systemName: "pin.fill").font(.system(size: 9)).foregroundColor("#8A9199")
             }
-            Text(activityText(w))
-              .font(.system(size: 11, design: .monospaced))
-              .foregroundColor(activityColor(w))
-              .lineLimit(1).truncationMode(.tail)
+          }
+          // dimension 1 — agent activity
+          if showsActivity(w) {
+            HStack(spacing: 5) {
+              if activityIcon(w) != "" {
+                Image(systemName: activityIcon(w)).font(.system(size: 9)).foregroundColor(activityColor(w))
+              }
+              Text(activityText(w))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(activityColor(w))
+                .lineLimit(1).truncationMode(.tail)
+            }
           }
           // dimension 2 — repo / git state (its own row, only when present).
           // Dirty = a compact yellow "*" trailing the branch (native "main*"), not prose.
@@ -332,11 +401,11 @@ func row(_ w) -> some View {
         }
         Button(action: { cmux("workspace.close", workspace_id: w.id) }) {
           Image(systemName: "xmark")
-            .font(.system(size: 12)).foregroundColor("#6E7787")
-            .frame(width: 22, height: 22)
+            .font(.system(size: 12)).foregroundColor(closeColor(w))
+            .frame(width: 24, height: 24)
         }
       }
-      .padding(8)
+      .padding(6)
       .background { RoundedRectangle(cornerRadius: 0).foregroundColor(rowFill(w)).opacity(rowFillOpacity(w)) }
     }
     .contextMenu {
@@ -383,11 +452,11 @@ VStack(alignment: .leading, spacing: 0) {
     Text("Workspaces").font(.system(size: 14, design: .monospaced)).bold()
       .foregroundColor("#D9D7CE")
     Spacer()
-    if workspaces.filter { isCompacting($0) }.count > 0 {
+    if workspaces.filter { needsYou($0) }.count > 0 {
       HStack(spacing: 4) {
-        Image(systemName: "hourglass").font(.system(size: 10)).foregroundColor("#DFBFFF")
-        Text("\(workspaces.filter { isCompacting($0) }.count)")
-          .font(.system(size: 11, design: .monospaced)).bold().foregroundColor("#DFBFFF")
+        Image(systemName: "bell.fill").font(.system(size: 10)).foregroundColor("#FFCC66")
+        Text("\(workspaces.filter { needsYou($0) }.count)")
+          .font(.system(size: 11, design: .monospaced)).bold().foregroundColor("#FFCC66")
       }
     }
     if workspaces.filter { isWorking($0) }.count > 0 {
@@ -397,11 +466,11 @@ VStack(alignment: .leading, spacing: 0) {
           .font(.system(size: 11, design: .monospaced)).bold().foregroundColor("#87D96C")
       }
     }
-    if workspaces.filter { needsYou($0) }.count > 0 {
+    if workspaces.filter { isCompacting($0) }.count > 0 {
       HStack(spacing: 4) {
-        Image(systemName: "bell.fill").font(.system(size: 10)).foregroundColor("#FFCC66")
-        Text("\(workspaces.filter { needsYou($0) }.count)")
-          .font(.system(size: 11, design: .monospaced)).bold().foregroundColor("#FFCC66")
+        Image(systemName: "hourglass").font(.system(size: 10)).foregroundColor("#DFBFFF")
+        Text("\(workspaces.filter { isCompacting($0) }.count)")
+          .font(.system(size: 11, design: .monospaced)).bold().foregroundColor("#DFBFFF")
       }
     }
     Text(clock.time).font(.system(size: 11, design: .monospaced)).foregroundColor("#707A8C")
@@ -412,12 +481,12 @@ VStack(alignment: .leading, spacing: 0) {
   // CLAUDE USAGE — one labelled section per provider (same component reused).
   // Meters sort by WINDOW length (the short 5h/cx5h above the weekly 7d/cx7d), not
   // by workspace .index — index depends on sentinel creation order and reshuffles
-  // across restarts, which would flip the rows. The 5h sentinels carry "5h" in the
-  // title; the weekly ones don't.
+  // across restarts, which would flip the rows. Match the stable title PREFIX,
+  // never a substring: a weekly countdown can itself contain "5h".
   if workspaces.filter { isClaudeMeter($0) }.count > 0 {
     VStack(alignment: .leading, spacing: 6) {
       Text("CLAUDE USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
-      ForEach(workspaces.filter { isClaudeMeter($0) }.sorted { $0.title.contains("5h") && !$1.title.contains("5h") }) { w in
+      ForEach(workspaces.filter { isClaudeMeter($0) }.sorted { $0.title.hasPrefix("5h") && !$1.title.hasPrefix("5h") }) { w in
         meterRow(w)
       }
     }
@@ -430,7 +499,7 @@ VStack(alignment: .leading, spacing: 0) {
   if workspaces.filter { isCodexMeter($0) }.count > 0 {
     VStack(alignment: .leading, spacing: 6) {
       Text("CODEX USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
-      ForEach(workspaces.filter { isCodexMeter($0) }.sorted { $0.title.contains("5h") && !$1.title.contains("5h") }) { w in
+      ForEach(workspaces.filter { isCodexMeter($0) }.sorted { $0.title.hasPrefix("cx5h") && !$1.title.hasPrefix("cx5h") }) { w in
         meterRow(w)
       }
     }

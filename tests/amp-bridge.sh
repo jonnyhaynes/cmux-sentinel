@@ -2,7 +2,7 @@
 # amp-bridge.sh — offline test for the Amp integration (hooks/amp-bridge.ts +
 # the agent-agnostic knobs it drives in hooks/cmux-bridge.sh).
 #
-# Two halves, because the two sides fail differently:
+# Three layers, because each boundary fails differently:
 #
 #  A. BEHAVIOUR — drives the real bash bridge with the exact env the amp plugin
 #     sets (CMUX_SENTINEL_SESSION_PID / _AGENT_LABEL / _LOG_SOURCE) against a
@@ -12,10 +12,12 @@
 #     each other, so one ending must not clear the other's ⚡. That property is
 #     the whole reason the plugin shells out instead of reimplementing state.
 #
-#  B. STRUCTURE — asserts the .ts adapter maps the right Amp events and keeps its
-#     invariants. Amp/Bun are NOT on the CI runner, so this half is static: it
-#     cannot execute the plugin. When `amp` IS present locally, one extra live
-#     check runs `amp plugins exec` to prove the file actually loads.
+#  B. ADAPTER — imports the JS-compatible .ts through Node and proves both the
+#     current atomic terminal-error protocol and its ordered legacy fallback,
+#     then statically checks event mappings and invariants.
+#
+#  C. AMP RUNTIME — when `amp` is available, runs one real `amp plugins exec`
+#     event to prove Amp loads the plugin and invokes its handler.
 #
 # No real cmux, amp or bun needed for the required checks, so this runs in CI on
 # Linux too.
@@ -99,6 +101,49 @@ echo "amp-bridge: behaviour (stubbed cmux)"
 # A live pid to own sessions with: this shell always passes kill -0.
 LIVE=$$
 
+caps="$(bash "$BRIDGE" --capabilities)"
+has "bridge advertises atomic terminal-failure support" "$caps" "stop-failure-final"
+
+# Execute the real adapter under Node (the .ts intentionally stays JS-compatible)
+# against both bridge generations. This proves the compatibility behavior rather
+# than grepping source: an old bridge says nothing for --capabilities and must see
+# ordered SessionEnd→StopFailure; a new bridge advertises the token and sees one
+# atomic StopFailureFinal event.
+PLUGIN_MJS="$ROOT/amp-bridge.mjs"
+cp "$PLUGIN" "$PLUGIN_MJS"
+cat > "$ROOT/adapter-harness.mjs" <<'JS'
+const handlers = new Map()
+const { default: install } = await import(process.env.PLUGIN_URL)
+install({ on: (event, handler) => handlers.set(event, handler) })
+handlers.get("agent.end")({ status: "error" })
+JS
+cat > "$ROOT/bin/old-bridge" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = "--capabilities" ]; then exit 0; fi
+cat >/dev/null
+printf '%s\n' "$1" >> "$ADAPTER_EVENTS"
+SH
+cat > "$ROOT/bin/new-bridge" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = "--capabilities" ]; then printf '%s\n' "protocol=2 stop-failure-final"; exit 0; fi
+cat >/dev/null
+printf '%s\n' "$1" >> "$ADAPTER_EVENTS"
+SH
+chmod +x "$ROOT/bin/old-bridge" "$ROOT/bin/new-bridge"
+
+run_adapter() { # $1=bridge $2=event-log
+  : > "$2"
+  PLUGIN_URL="file://$PLUGIN_MJS" CMUX_SENTINEL_BRIDGE="$1" CMUX_WORKSPACE_ID="$WS" \
+    ADAPTER_EVENTS="$2" node "$ROOT/adapter-harness.mjs"
+}
+OLD_EVENTS="$ROOT/old-adapter-events"
+NEW_EVENTS="$ROOT/new-adapter-events"
+run_adapter "$ROOT/bin/old-bridge" "$OLD_EVENTS"
+is "old bridge fallback clears first, then preserves the error pill" "$(cat "$OLD_EVENTS")" "$(printf 'SessionEnd\nStopFailure')"
+run_adapter "$ROOT/bin/new-bridge" "$NEW_EVENTS"
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$NEW_EVENTS" ] && break; sleep 0.1; done
+is "new bridge gets one atomic terminal-error event" "$(cat "$NEW_EVENTS")" "StopFailureFinal"
+
 # ── turn lifecycle ────────────────────────────────────────────────────────
 amp_event UserPromptSubmit "$LIVE"
 is "agent.start → ⚡ working" "$(title)" "⚡workspace"
@@ -112,15 +157,13 @@ has "agent.end notifies as Amp" "$(cat "$ROOT/ledger" 2>/dev/null)" "--title Amp
 hasnt "agent.end never says Claude Code" "$(cat "$ROOT/ledger" 2>/dev/null)" "Claude Code"
 has "log source is amp" "$(cat "$ROOT/ledger" 2>/dev/null)" "--source amp"
 
-# ── agent.end(error) is transient: surfaces, does NOT decrement ───────────
+# ── agent.end(error) is terminal: surfaces AND decrements atomically ──────
 : > "$ROOT/ledger"
 amp_event UserPromptSubmit "$LIVE"
-amp_event StopFailure "$LIVE" '{"error":"boom"}'
-is "agent.end(error) keeps ⚡ (transient)" "$(title)" "⚡workspace"
+amp_event StopFailureFinal "$LIVE" '{"error":"boom"}'
+is "agent.end(error) → idle immediately" "$(title)" "workspace"
 has "agent.end(error) uses amp status key" "$(cat "$ROOT/ledger")" "amp_error"
 has "agent.end(error) notifies as Amp Error" "$(cat "$ROOT/ledger")" "--title Amp Error"
-amp_event Stop "$LIVE"
-is "…and a later agent.end still clears" "$(title)" "workspace"
 
 # ── opt-in ❓ waiting ─────────────────────────────────────────────────────
 amp_event UserPromptSubmit "$LIVE"
@@ -135,7 +178,6 @@ is "…then idle" "$(title)" "workspace"
 # Amp and Claude Code in ONE workspace, each with its own session pid. Neither
 # ending may clear the other's marker.
 amp_event UserPromptSubmit "$LIVE"
-cc_event  UserPromptSubmit "$LIVE"   # same pid would collide; use a distinct one
 # Use a second genuinely-live pid: a background sleep we control.
 sleep 30 & CO=$!
 cc_event  UserPromptSubmit "$CO"
@@ -172,6 +214,7 @@ has "maps session.start"  "$SRC" 'amp.on("session.start"'
 has "maps agent.start"    "$SRC" 'amp.on("agent.start"'
 has "maps agent.end"      "$SRC" 'amp.on("agent.end"'
 has "maps tool.call"      "$SRC" 'amp.on("tool.call"'
+has "error end is one atomic bridge event" "$SRC" 'drive("StopFailureFinal"'
 has "sets Amp label"      "$SRC" 'CMUX_SENTINEL_AGENT_LABEL: "Amp"'
 has "sets amp log source" "$SRC" 'CMUX_SENTINEL_LOG_SOURCE: "amp"'
 has "passes own pid"      "$SRC" "CMUX_SENTINEL_SESSION_PID"

@@ -27,15 +27,16 @@
 #     single most dangerous bug in this file, hence the loud comment.
 #
 # Also unlike the others: these are not rolling 5h/7d WINDOWS but a monthly
-# allowance, so the reset text is Amp's own phrase ("in 1 month") rather than a
-# computed countdown. The `$` workspace credit balance is deliberately NOT metered
+# allowance, so the reset text comes from Amp's own phrase rather than a computed
+# countdown; the dashboard compacts simple units (`26 days` → `26d`) to fit. The
+# `$` workspace credit balance is deliberately NOT metered
 # — it's a currency balance, not a 0-100% utilization, so it has no honest bar.
 #
 # THE ORB METER IS OFF BY DEFAULT, on purpose. A sentinel is an ordinary
 # workspace, so a meter nobody looks at is not free — it still eats one of the
 # ⌘1…⌘9 keys (see CLAUDE.md's shortcut-layout invariant). Most people never run
-# orbs, so metering orb usage by default would cost a real key to show a permanent
-# 100%. Opt in with AMP_ORB_METER=1.
+# orbs, so metering orb usage by default would cost a real key for an unused row.
+# Opt in with AMP_ORB_METER=1.
 #
 # Modes:
 #   --print     run + print parsed values (no cmux writes)
@@ -45,9 +46,9 @@
 #   --buckets   print the labels this account HAS a live allowance for (one per
 #               line); prints NOTHING when it can't tell. For cmux-sentinel-setup.sh.
 #
-# Provider gating: this is the AMP provider; it SELF-GATES so it never errors or
-# shows a panel when Amp is absent/disabled (the sidebar hides a provider whose
-# sentinels are missing):
+# Provider gating: this is the AMP provider; it SELF-GATES so Amp being absent or
+# disabled never errors. Panel visibility is separate: the sidebar hides a provider
+# only when its sentinels are absent, and doctor flags leftovers.
 #   * disabled (USAGE_PROVIDERS doesn't list "amp"; default is "claude") → exit 0.
 #   * amp not installed / never logged in (no credentials file) → exit 0, silently.
 #   * logged in but `amp usage` fails or is unparseable → transient "⚠ offline".
@@ -183,10 +184,10 @@ sev_dot() {
 mark_offline() {
   local reason="${1:-offline}"
   cmux ping &>/dev/null || return 0
-  _paint "$LABEL_AMPU" "$LABEL_AMPU  ⚠ ${reason}" >/dev/null 2>&1 || true
+  _paint "$LABEL_AMPU" "$LABEL_AMPU |⚠ ${reason}|" >/dev/null 2>&1 || true
   _clear_progress "$LABEL_AMPU"
   if [ "$ORB_METER" = "1" ]; then
-    _paint "$LABEL_AMPO" "$LABEL_AMPO  ⚠ ${reason}" >/dev/null 2>&1 || true
+    _paint "$LABEL_AMPO" "$LABEL_AMPO |⚠ ${reason}|" >/dev/null 2>&1 || true
     _clear_progress "$LABEL_AMPO"
   fi
 }
@@ -214,7 +215,19 @@ reset_text() { # $1 = text
     | grep -oE "resets[^-]*in [^-]*" 2>/dev/null \
     | head -1 \
     | sed -E 's/^.* in //; s/[[:space:]]*$//' \
+    | tr -d '|' \
     | head -c 12
+}
+
+# Keep the source-derived renewal phrase in --print, but make the narrow dashboard
+# label linear and compact. Unknown prose passes through unchanged.
+compact_reset_text() { # $1 = reset_text
+  printf '%s' "$1" | sed -E \
+    -e 's/^([0-9]+) minutes?$/\1m/' \
+    -e 's/^([0-9]+) hours?$/\1h/' \
+    -e 's/^([0-9]+) days?$/\1d/' \
+    -e 's/^([0-9]+) weeks?$/\1w/' \
+    -e 's/^([0-9]+) months?$/\1mo/'
 }
 
 # INVERSION LIVES HERE — amp reports REMAINING, the meter shows USED.
@@ -227,16 +240,18 @@ used_from_remaining() { # $1 = remaining pct (already sanitized 0-100)
 # state (setup skips it), so that's a quiet no-op; a missing sentinel for a LIVE
 # one is a real broken install and dies.
 _update_bucket() { # $1=label $2=na(0/1) $3=used_pct $4=reset_text
-  local label="$1" na="$2" pct="${3:-0}" human="${4:-?}" bar dot frac err rc
+  local label="$1" na="$2" pct="${3:-0}" human="${4:-?}" bar dot frac detail err rc
   if [ "$na" = 1 ]; then
-    err=$(_paint "$label" "$label  n/a"); rc=$?
+    err=$(_paint "$label" "$label |n/a|"); rc=$?
     [ "$rc" = 10 ] && return 0
     [ "$rc" = 11 ] && die "rename rejected for $label sentinel: ${err:-no detail}"
     _clear_progress "$label"
     return
   fi
-  bar=$(make_bar "$pct" 10); dot=$(sev_dot "$pct"); frac=$(to_frac "$pct")
-  err=$(_meter_write "$label" "$label ${bar} ${pct}% ${human}${dot}" "$frac" "${pct}% ${human}${dot}"); rc=$?
+  human=$(compact_reset_text "$human")
+  bar=$(make_bar "$pct" 14); dot=$(sev_dot "$pct"); frac=$(to_frac "$pct")
+  detail="${pct}% (${human})${dot}"
+  err=$(_meter_write "$label" "$label |${detail}|${bar}" "$frac" "$detail"); rc=$?
   [ "$rc" = 10 ] && die "no '$label' sentinel workspace (title \"$label\" or starting \"$label \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
   [ "$rc" = 11 ] && die "rename rejected for $label sentinel: ${err:-no detail}"
 }
@@ -245,8 +260,7 @@ main() {
   local mode="${1:---print}" out remU remO usedU usedO human naU=0 naO=0
 
   # Provider gate: a disabled or not-installed provider is a clean no-op — no
-  # error spam, no broken panel. The sidebar hides a provider whose sentinels are
-  # absent, so exit 0 here = no panel.
+  # error spam. Existing sentinels are not removed here; doctor reports leftovers.
   if ! provider_enabled; then
     echo "amp disabled (USAGE_PROVIDERS=\"$USAGE_PROVIDERS\") — nothing to do" >&2
     exit 0
@@ -300,12 +314,13 @@ main() {
     if [ "$naU" = 1 ]; then echo "$LABEL_AMPU: n/a"
     else echo "$LABEL_AMPU: ${usedU}% used (${remU}% remaining), resets in ${human}"; fi
     if [ "$naO" = 1 ]; then echo "$LABEL_AMPO: n/a"
-    else echo "$LABEL_AMPO: ${usedO}% used (${remO}% remaining), resets in ${human}${ORB_METER:+}"; fi
+    else echo "$LABEL_AMPO: ${usedO}% used (${remO}% remaining), resets in ${human}"; fi
     [ "$ORB_METER" = "1" ] || echo "(orb meter disabled — set AMP_ORB_METER=1 to show it)"
     return
   fi
 
   if [ "$mode" = "--update" ]; then
+    cmux ping &>/dev/null || die "cmux socket rejected (restart cmux to apply socketControlMode=automation)"
     _update_bucket "$LABEL_AMPU" "$naU" "${usedU:-0}" "$human"
     [ "$ORB_METER" = "1" ] && _update_bucket "$LABEL_AMPO" "$naO" "${usedO:-0}" "$human"
     return 0
