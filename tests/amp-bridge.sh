@@ -32,7 +32,8 @@ PLUGIN="${PLUGIN:-$HERE/../hooks/amp-bridge.ts}"
 [ -f "$PLUGIN" ] || { echo "plugin not found: $PLUGIN" >&2; exit 2; }
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cmux-amp-test.XXXXXX")"
-trap 'rm -rf "$ROOT"' EXIT
+cleanup() { rm -rf "$ROOT"; }
+trap cleanup EXIT
 mkdir -p "$ROOT/bin"
 
 # UUID-shaped, but BUILT AT RUNTIME so no literal id sits in the source for the
@@ -178,8 +179,12 @@ is "…then idle" "$(title)" "workspace"
 # Amp and Claude Code in ONE workspace, each with its own session pid. Neither
 # ending may clear the other's marker.
 amp_event UserPromptSubmit "$LIVE"
-# Use a second genuinely-live pid: a background sleep we control.
+# Use a second genuinely-live pid: a background sleep we control. Temporarily
+# clear the parent cleanup BEFORE forking; some Bash versions propagate EXIT to
+# an asynchronous child, which can delete $ROOT when the helper is killed.
+trap - EXIT
 sleep 30 & CO=$!
+trap cleanup EXIT
 cc_event  UserPromptSubmit "$CO"
 is "two agents, one workspace → ⚡" "$(title)" "⚡workspace"
 amp_event Stop "$LIVE"
@@ -189,8 +194,9 @@ is "last agent ends → idle" "$(title)" "workspace"
 kill "$CO" 2>/dev/null; wait "$CO" 2>/dev/null
 
 # ── dead-session reaping ─────────────────────────────────────────────────
-sleep 30 & DEAD=$!
-kill "$DEAD" 2>/dev/null; wait "$DEAD" 2>/dev/null   # now a dead pid
+# Deliberately outside macOS/Linux PID ranges, avoiding another async helper and
+# its inherited-trap race entirely.
+DEAD=2147483647
 amp_event UserPromptSubmit "$DEAD"
 amp_event SessionStart "$LIVE" '{"source":"startup"}'
 is "crashed Amp session is reaped by SessionStart" "$(title)" "workspace"
