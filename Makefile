@@ -15,7 +15,8 @@ SCRIPTS := bin/cmux-claude-usage.sh bin/cmux-codex-usage.sh bin/cmux-sentinel-do
            hooks/zed-bridge.sh bin/cmux-open-in-zed.sh bin/zed-usage-tui.sh \
            tests/bridge-state.sh tests/poller-gate.sh tests/codex-poller.sh \
            tests/install-hooks.sh tests/sentinel-setup.sh tests/group-sync.sh \
-           tests/zed-bridge.sh tests/open-in-zed.sh tests/usage-tui.sh
+           tests/zed-bridge.sh tests/open-in-zed.sh tests/usage-tui.sh \
+           tests/amp-bridge.sh tests/amp-poller.sh
 MD      := $(wildcard *.md) $(wildcard docs/*.md)
 
 .PHONY: help check ci lint shellcheck secrets markdown test doctor sidebar fmt fmt-check
@@ -60,6 +61,8 @@ test:
 	bash tests/zed-bridge.sh
 	bash tests/open-in-zed.sh
 	bash tests/usage-tui.sh
+	bash tests/amp-bridge.sh
+	bash tests/amp-poller.sh
 
 # health-check the live setup (read-only) — bridge/hooks/launchd/automation/sentinels.
 doctor:

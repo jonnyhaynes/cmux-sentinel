@@ -112,9 +112,48 @@ ckn "did not create cx5h (codex disabled)" created cx5h
 ck  "exactly 2 created" [ "$(ncreated)" = 2 ]
 
 echo "T2: providers=\"claude codex\" → creates all four"
+# $HOME is a throwaway with no ~/.codex/auth.json, so the real poller can't tell us
+# which windows exist → setup fails open and creates both codex sentinels.
 reset
 USAGE_PROVIDERS="claude codex" bash "$SETUP" >/dev/null 2>&1
 for l in 5h 7d cx5h cx7d; do ck "created $l" created "$l"; done
+
+# ── per-window gating (CODEX_POLLER --buckets) ────────────────────────────────
+# OpenAI dropped the 5h window for Codex Pro, so setup asks the poller which
+# windows the account actually has rather than assuming both. A sentinel for a
+# window that doesn't exist is a permanently-"n/a" row that still eats a ⌘ key.
+stub_poller() { # $1 = what `--buckets` prints ("" = can't tell)
+  # shellcheck disable=SC2016  # $1 belongs to the GENERATED script — must stay literal
+  printf '#!/bin/bash\n[ "$1" = --buckets ] || exit 2\nprintf %%s "%s"\n' "$1" > "$ROOT/bin/poller"
+  chmod +x "$ROOT/bin/poller"
+}
+
+echo "T2b: poller reports weekly-only → cx5h skipped, cx7d still created"
+reset
+stub_poller 'cx7d
+'
+out=$(USAGE_PROVIDERS="claude codex" CODEX_POLLER="$ROOT/bin/poller" bash "$SETUP" 2>&1)
+ckn "did not create cx5h (no 5h window on this account)" created cx5h
+ck  "created cx7d (window exists)" created cx7d
+ck  "claude sentinels unaffected" created 5h
+ckhas "explains the skip" "$out" "skipping 'cx5h'"
+
+echo "T2c: poller can't tell (offline/expired) → FAILS OPEN, creates both"
+reset
+stub_poller ''
+USAGE_PROVIDERS="claude codex" CODEX_POLLER="$ROOT/bin/poller" bash "$SETUP" >/dev/null 2>&1
+ck "created cx5h (empty answer must not suppress a meter)" created cx5h
+ck "created cx7d" created cx7d
+
+echo "T2d: poller reports both windows → both created (5h restored upstream)"
+reset
+stub_poller 'cx5h
+cx7d
+'
+USAGE_PROVIDERS="claude codex" CODEX_POLLER="$ROOT/bin/poller" bash "$SETUP" >/dev/null 2>&1
+ck "created cx5h (window came back → meter returns by itself)" created cx5h
+ck "created cx7d" created cx7d
+rm -f "$ROOT/bin/poller"
 
 echo "T3: idempotent — existing sentinels are left alone"
 reset

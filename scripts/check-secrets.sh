@@ -61,6 +61,13 @@ if [ -f sidebars/workspaces.swift ] \
   && ! grep -Eq 'w\.title\.hasPrefix\("cx(5h|7d) "\)' sidebars/workspaces.swift; then
   flag "sidebar is missing its isCodexMeter title anchors (w.title.hasPrefix)" "sidebars/workspaces.swift"
 fi
+# Same for the Amp provider — a clobber that dropped isAmpMeter would silently kill
+# the AMP USAGE panel. ampo is opt-in (AMP_ORB_METER=1) but its anchor must still
+# ship, or turning the orb meter on would create a sentinel nothing renders.
+if [ -f sidebars/workspaces.swift ] \
+  && ! grep -Eq 'w\.title\.hasPrefix\("amp(u|o) "\)' sidebars/workspaces.swift; then
+  flag "sidebar is missing its isAmpMeter title anchors (w.title.hasPrefix)" "sidebars/workspaces.swift"
+fi
 
 if [ "$fail" -ne 0 ]; then
   echo >&2

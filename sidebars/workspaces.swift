@@ -167,9 +167,23 @@ func isCodexMeter(_ w) -> Bool {
   if w.title.hasPrefix("cx7d ") { return true }  // Codex — weekly window (secondary)
   return false
 }
+// Amp provider — fed by bin/cmux-amp-usage.sh, which scrapes `amp usage`.
+// Labels are distinct from every other provider's ("ampu"/"ampo" can't collide
+// with "5h "/"7d "/"cx5h "/"cx7d "). Unlike the others these are NOT rolling time
+// windows but one monthly subscription allowance: "ampu" = agent/thread usage,
+// "ampo" = orb (remote machine) usage. "ampo" only exists when the user opted in
+// with AMP_ORB_METER=1 — a sentinel costs a ⌘ key, so it isn't created by default.
+func isAmpMeter(_ w) -> Bool {
+  if w.title == "ampu" { return true }           // bare bootstrap label
+  if w.title.hasPrefix("ampu ") { return true }  // Amp — subscription agent usage
+  if w.title == "ampo" { return true }           // bare bootstrap label
+  if w.title.hasPrefix("ampo ") { return true }  // Amp — orb usage (opt-in)
+  return false
+}
 func isUsageMeter(_ w) -> Bool {
   if isClaudeMeter(w) { return true }
   if isCodexMeter(w) { return true }
+  if isAmpMeter(w) { return true }
   return false
 }
 
@@ -417,6 +431,21 @@ VStack(alignment: .leading, spacing: 0) {
     VStack(alignment: .leading, spacing: 6) {
       Text("CODEX USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
       ForEach(workspaces.filter { isCodexMeter($0) }.sorted { $0.title.contains("5h") && !$1.title.contains("5h") }) { w in
+        meterRow(w)
+      }
+    }
+    .padding(9)
+    Divider()
+  }
+
+  // AMP USAGE — same component; hidden unless Amp sentinels exist. Fed by
+  // bin/cmux-amp-usage.sh. Sorted so "ampu" (the allowance everyone has) sits
+  // above the opt-in "ampo"; both are monthly, so there's no window length to
+  // sort by — `.contains("ampu")` is the equivalent stable key.
+  if workspaces.filter { isAmpMeter($0) }.count > 0 {
+    VStack(alignment: .leading, spacing: 6) {
+      Text("AMP USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
+      ForEach(workspaces.filter { isAmpMeter($0) }.sorted { $0.title.contains("ampu") && !$1.title.contains("ampu") }) { w in
         meterRow(w)
       }
     }
