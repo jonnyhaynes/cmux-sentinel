@@ -67,7 +67,9 @@ function supportsFinalFailure() {
     const result = spawnSync("bash", [BRIDGE, "--capabilities"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
-      timeout: 1000,
+      // Plugin load can overlap other startup work; avoid misclassifying a current
+      // bridge as legacy just because process launch exceeded a one-second budget.
+      timeout: 5000,
     })
     return typeof result.stdout === "string" && result.stdout.includes("stop-failure-final")
   } catch (_) {
