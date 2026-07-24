@@ -129,16 +129,120 @@ else
 fi
 
 if [ "$codex_on" = 1 ] && have cmux && have jq; then
+  # A sentinel is only MISSING if the account actually has that window: setup
+  # deliberately skips one OpenAI doesn't return (it dropped 5h for Codex Pro), so
+  # nagging to "create it" would be a permanent false alarm — and a doctor that cries
+  # wolf gets ignored, which costs us the real warnings. Ask the poller; empty answer
+  # (offline/expired) = can't tell, so fall back to the old "expect both".
+  cx_live=""
+  [ -x "$HERE/cmux-codex-usage.sh" ] && cx_live=$("$HERE/cmux-codex-usage.sh" --buckets 2>/dev/null)
   for lbl in "$lblcx5" "$lblcx7"; do
     ref="$(cmux workspace list --json 2>/dev/null \
       | jq -r --arg l "$lbl" '.workspaces[] | select(.title == $l or (.title|startswith($l+" "))) | .ref' 2>/dev/null | head -1)"
+    lbl_live=1
+    [ -n "$cx_live" ] && ! printf '%s\n' "$cx_live" | grep -qxF -- "$lbl" && lbl_live=0
     if [ -n "$ref" ]; then
-      if [ "$codex_inst" = 1 ]; then ok "'$lbl' sentinel present ($ref)"
-      else warn "'$lbl' sentinel present ($ref) but codex is uninstalled — close it to hide the panel: cmux workspace close $ref"; fi
-    elif [ "$codex_inst" = 1 ]; then warn "no '$lbl' sentinel (title \"$lbl\" or starting \"$lbl \") — create it (see install.sh)"
+      if [ "$codex_inst" != 1 ]; then warn "'$lbl' sentinel present ($ref) but codex is uninstalled — close it to hide the panel: cmux workspace close $ref"
+      elif [ "$lbl_live" = 0 ]; then warn "'$lbl' sentinel present ($ref) but your plan has no such window — it'll read 'n/a' forever and still eats a ⌘ key: cmux workspace close $ref"
+      else ok "'$lbl' sentinel present ($ref)"; fi
+    elif [ "$codex_inst" = 1 ]; then
+      if [ "$lbl_live" = 0 ]; then ok "no '$lbl' sentinel — correct, your plan has no such window"
+      else warn "no '$lbl' sentinel (title \"$lbl\" or starting \"$lbl \") — create it (see install.sh)"; fi
     fi
   done
 fi
+
+# Amp provider — same installed × enabled × sentinel cross-check. "Installed" is
+# the CLI plus a credentials file (existence only, never read): an expired login
+# still has the file, so it stays a transient offline rather than a false
+# "uninstalled". Amp meters a MONTHLY allowance, not rolling windows, and the orb
+# meter only exists when AMP_ORB_METER=1 — the poller reflects that in --buckets,
+# so the same live-label logic covers it with no extra branch.
+lblampu="${SENTINEL_AMPU_LABEL:-ampu}"; lblampo="${SENTINEL_AMPO_LABEL:-ampo}"
+amp_installed() { command -v amp >/dev/null 2>&1 && [ -s "$HOME/.local/share/amp/secrets.json" ]; }
+case " $providers " in *" amp "*) amp_on=1 ;; *) amp_on=0 ;; esac
+if amp_installed; then amp_inst=1; else amp_inst=0; fi
+
+if [ "$amp_on" = 1 ] && [ "$amp_inst" = 1 ]; then
+  ok "amp: installed + enabled → meters active"
+elif [ "$amp_on" = 1 ]; then
+  warn "amp: enabled but NOT installed/logged in here — poller exits cleanly, no panel"
+elif [ "$amp_inst" = 1 ]; then
+  ok "amp: installed but not enabled — add it to USAGE_PROVIDERS (\"claude amp\") to show its meters"
+else
+  ok "amp: not installed and not enabled — nothing to do"
+fi
+
+if [ "$amp_on" = 1 ] && have cmux && have jq; then
+  amp_live=""
+  [ -x "$HERE/cmux-amp-usage.sh" ] && amp_live=$("$HERE/cmux-amp-usage.sh" --buckets 2>/dev/null)
+  for lbl in "$lblampu" "$lblampo"; do
+    ref="$(cmux workspace list --json 2>/dev/null \
+      | jq -r --arg l "$lbl" '.workspaces[] | select(.title == $l or (.title|startswith($l+" "))) | .ref' 2>/dev/null | head -1)"
+    lbl_live=1
+    [ -n "$amp_live" ] && ! printf '%s\n' "$amp_live" | grep -qxF -- "$lbl" && lbl_live=0
+    if [ -n "$ref" ]; then
+      if [ "$amp_inst" != 1 ]; then warn "'$lbl' sentinel present ($ref) but amp is uninstalled — close it to hide the panel: cmux workspace close $ref"
+      elif [ "$lbl_live" = 0 ]; then warn "'$lbl' sentinel present ($ref) but it isn't metered (orb meter off, or no such allowance) — it'll read 'n/a' forever and still eats a ⌘ key: cmux workspace close $ref"
+      else ok "'$lbl' sentinel present ($ref)"; fi
+    elif [ "$amp_inst" = 1 ]; then
+      if [ "$lbl_live" = 0 ]; then ok "no '$lbl' sentinel — correct, it isn't metered"
+      else warn "no '$lbl' sentinel (title \"$lbl\" or starting \"$lbl \") — create it (see install.sh)"; fi
+    fi
+  done
+fi
+
+# ── ⌘N shortcut layout ────────────────────────────────────────────────────────
+# Mirrors cmux's WorkspaceShortcutMapper (Sources/App/TerminalDirectoryOpenSupport.swift;
+# re-verified unchanged on 0.64.19): ⌘1…⌘8 select indices 0…7, and ⌘9 ALWAYS selects
+# the LAST workspace (count-1) — so indices 8…count-2 are the "keyless band".
+#
+# A sentinel is an ordinary workspace to cmux ("sentinel" only exists in our sidebar's
+# predicates), so a meter on a keyed index silently EATS that ⌘ key.
+# bin/cmux-sentinel-setup.sh parks them in the band, but that's a one-shot pass: CLOSING
+# workspaces above a meter shifts it up, and the invariant decays with no symptom beyond
+# a ⌘ key doing something unexpected. Hence a check — this is exactly the class of silent
+# failure the doctor exists for. Read-only by design: we report, setup fixes. (Deliberately
+# NOT auto-repaired in the pollers — re-asserting order every 5min would fight manual
+# drag-reordering; see CLAUDE.md.)
+echo "• ⌘N shortcut layout"
+if have cmux && have jq; then
+  lay="$(cmux workspace list --json 2>/dev/null)"
+  lay_labels="$(printf '%s\n' "$lbl5" "$lbl7" "$lblcx5" "$lblcx7" | jq -R . | jq -s .)"
+  # Digits eaten by a meter, computed straight off .index — never off the ref, which is
+  # an insertion-order handle and does NOT equal display position (it only coincides
+  # right after a restart).
+  eaten="$(printf '%s' "$lay" | jq -r --argjson ls "$lay_labels" '
+      (.workspaces | length) as $n
+      | [ .workspaces[]
+          | select(.title as $t | $ls | any(. as $l | $t == $l or ($t | startswith($l + " "))))
+          | .index
+          | if . == $n - 1 then "⌘9" elif . <= 7 then "⌘\(. + 1)" else empty end ]
+      | unique | join(", ")' 2>/dev/null)"
+  n_ws="$(printf '%s' "$lay" | jq -r '.workspaces | length' 2>/dev/null)"
+  n_meters="$(printf '%s' "$lay" | jq -r --argjson ls "$lay_labels" '
+      [ .workspaces[] | select(.title as $t | $ls | any(. as $l | $t == $l or ($t | startswith($l + " ")))) ] | length' 2>/dev/null)"
+
+  if [ -z "${lay:-}" ] || [ -z "${n_ws:-}" ]; then
+    warn "couldn't read the workspace list — skipping layout check"
+  elif [ "${n_meters:-0}" = 0 ]; then
+    note "no meters in this window — nothing to park"
+  elif [ -n "$eaten" ]; then
+    warn "meters are eating $eaten — re-park them: $HERE/cmux-sentinel-setup.sh"
+  else
+    # Headroom: a meter needs 8 real workspaces above it to clear ⌘1…⌘8, so the number
+    # of reals above the first meter minus 8 is how many closes we can absorb.
+    first_meter="$(printf '%s' "$lay" | jq -r --argjson ls "$lay_labels" '
+        [ .workspaces[] | select(.title as $t | $ls | any(. as $l | $t == $l or ($t | startswith($l + " ")))) | .index ] | min' 2>/dev/null)"
+    slack=$(( first_meter - 8 ))
+    if [ "$slack" -le 1 ]; then
+      ok "all 9 ⌘ keys on real workspaces (meters parked in the keyless band)"
+      note "headroom is thin — closing $((slack + 1)) more workspace(s) above the meters will eat ⌘8; re-run cmux-sentinel-setup.sh after a cleanup"
+    else
+      ok "all 9 ⌘ keys on real workspaces (meters parked in the keyless band)"
+    fi
+  fi
+else warn "cmux or jq unavailable — can't check the ⌘N layout"; fi
 
 # Sidebar DATA snapshot (cmux 0.64.16+ exposes extension.sidebar.snapshot). This is
 # the closest read-only view of what cmux actually projects to the sidebar — handy
@@ -155,6 +259,7 @@ if have cmux && have jq; then
     labels=""
     [ "$claude_on" = 1 ] && labels="$labels $lbl5 $lbl7"
     [ "$codex_on" = 1 ]  && labels="$labels $lblcx5 $lblcx7"
+    [ "$amp_on" = 1 ]    && labels="$labels $lblampu $lblampo"
     for lbl in $labels; do
       row="$(printf '%s' "$snap" | jq -r --arg l "$lbl" \
         'first(.workspaces[] | select(.title == $l or (.title|startswith($l+" ")))) | .title // empty' 2>/dev/null)"

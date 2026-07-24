@@ -36,6 +36,8 @@
 #   --print     fetch + print parsed values (no cmux writes)
 #   --raw       fetch + print the raw wham/usage JSON
 #   --update    fetch + paint both sentinel workspaces (title + native progress bar)
+#   --buckets   print the labels this account HAS a live window for (one per line);
+#               prints NOTHING when it can't tell. For cmux-sentinel-setup.sh.
 #
 # Provider gating: this is the CODEX provider; it SELF-GATES so it never errors or
 # shows a panel when Codex is absent/disabled (the sidebar hides a provider whose
@@ -249,7 +251,12 @@ _update_bucket() { # $1=label  $2=na(0/1)  $3=pct  $4=human_reset
   local label="$1" na="$2" pct="${3:-0}" human="${4:-?}" bar dot frac err rc
   if [ "$na" = 1 ]; then
     err=$(_paint "$label" "$label  n/a"); rc=$?
-    [ "$rc" = 10 ] && die "no '$label' sentinel workspace (title \"$label\" or starting \"$label \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
+    # No sentinel for a window the account doesn't HAVE is the intended steady state,
+    # not a misconfiguration: setup deliberately skips creating one (see its
+    # `ensure_live`), and OpenAI dropped the 5h window for Codex Pro. Dying here would
+    # make the launchd poller fail every 5 min over a meter nobody asked for. A
+    # missing sentinel for a LIVE window still dies below — that one IS a real error.
+    [ "$rc" = 10 ] && return 0
     [ "$rc" = 11 ] && die "rename rejected for $label sentinel: ${err:-no detail}"
     _clear_progress "$label"
     return
@@ -309,6 +316,22 @@ main() {
     h7=$(humanize_until "$(reset_epoch "$win7d")")
   else na7=1; fi
 
+  # Which buckets does this account actually HAVE? Consumed by cmux-sentinel-setup.sh
+  # so it only creates sentinels for real windows: OpenAI dropped the 5h window for
+  # Pro, and a permanently-"n/a" cx5h isn't free — it's an ordinary workspace, so it
+  # still eats one of the ⌘1…⌘9 keys to show nothing. Detected, never hardcoded, so
+  # the sentinel comes back on its own if OpenAI restores the window.
+  #
+  # Prints ONLY on the paths that positively parsed a window; every can't-tell path
+  # (disabled, not logged in, expired token, offline, schema change) exits earlier
+  # with no stdout. That asymmetry IS the contract — the caller reads empty as "don't
+  # know, create both", so a bad network can never silently delete a meter.
+  if [ "$mode" = "--buckets" ]; then
+    [ "$na5" = 1 ] || echo "$LABEL_CX5H"
+    [ "$na7" = 1 ] || echo "$LABEL_CX7D"
+    return
+  fi
+
   if [ "$mode" = "--print" ]; then
     if [ "$na5" = 1 ]; then echo "cx5h  n/a  · no 5h window"; else echo "cx5h  ${pct5}%  · resets ${h5}"; fi
     if [ "$na7" = 1 ]; then echo "cx7d  n/a  · no weekly window"; else echo "cx7d  ${pct7}%  · resets ${h7}"; fi
@@ -327,7 +350,7 @@ main() {
     return
   fi
 
-  die "unknown mode: $mode (use --print | --raw | --update)"
+  die "unknown mode: $mode (use --print | --raw | --update | --buckets)"
 }
 
 main "$@"

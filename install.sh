@@ -16,7 +16,8 @@ for arg in "$@"; do
   case "$arg" in
     --with-zed)    export WITH_ZED=1 ;;
     --with-bridge) export WITH_BRIDGE=1 ;;
-    -h|--help)     echo "usage: install.sh [--with-bridge] [--with-zed]"; exit 0 ;;
+    --with-amp)    export WITH_AMP=1 ;;
+    -h|--help)     echo "usage: install.sh [--with-bridge] [--with-zed] [--with-amp]"; exit 0 ;;
     *) echo "install.sh: unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -97,15 +98,19 @@ echo "Installing opinionated cmux sidebar from $here"
 
 mkdir -p "$HOME/bin" "$cfg/sidebars" "$HOME/.claude/hooks" "$HOME/Library/LaunchAgents"
 
-# 1. pollers + doctor. Both pollers are deployed (the Codex one self-gates and is a
-#    no-op until you opt in via USAGE_PROVIDERS — see usage-sentinels.env), so an
-#    out-of-the-box install is Claude-only but Codex is one env edit away.
+# 1. pollers + doctor. ALL THREE pollers are deployed (the Codex and Amp ones
+#    self-gate and are no-ops until you opt in via USAGE_PROVIDERS — see
+#    usage-sentinels.env), so an out-of-the-box install is Claude-only but each
+#    other provider is one env edit away.
 bak "$HOME/bin/cmux-claude-usage.sh"
 install -m 0755 "$here/bin/cmux-claude-usage.sh" "$HOME/bin/cmux-claude-usage.sh"
 echo "  -> ~/bin/cmux-claude-usage.sh"
 bak "$HOME/bin/cmux-codex-usage.sh"
 install -m 0755 "$here/bin/cmux-codex-usage.sh" "$HOME/bin/cmux-codex-usage.sh"
 echo "  -> ~/bin/cmux-codex-usage.sh  (opt-in: add 'codex' to USAGE_PROVIDERS)"
+bak "$HOME/bin/cmux-amp-usage.sh"
+install -m 0755 "$here/bin/cmux-amp-usage.sh" "$HOME/bin/cmux-amp-usage.sh"
+echo "  -> ~/bin/cmux-amp-usage.sh  (opt-in: add 'amp' to USAGE_PROVIDERS)"
 install -m 0755 "$here/bin/cmux-sentinel-doctor.sh" "$HOME/bin/cmux-sentinel-doctor.sh"
 echo "  -> ~/bin/cmux-sentinel-doctor.sh  (run anytime to health-check the setup)"
 install -m 0755 "$here/bin/cmux-sentinel-setup.sh" "$HOME/bin/cmux-sentinel-setup.sh"
@@ -137,6 +142,10 @@ cxplist="$HOME/Library/LaunchAgents/com.cmux-codex-usage.plist"
 bak "$cxplist"
 sed "s#/Users/YOUR_USERNAME#$HOME#g" "$here/examples/com.cmux-codex-usage.plist" > "$cxplist"
 echo "  -> $cxplist  (dormant — bootstrap it only if you enable Codex)"
+ampplist="$HOME/Library/LaunchAgents/com.cmux-amp-usage.plist"
+bak "$ampplist"
+sed "s#/Users/YOUR_USERNAME#$HOME#g" "$here/examples/com.cmux-amp-usage.plist" > "$ampplist"
+echo "  -> $ampplist  (dormant — bootstrap it only if you enable Amp)"
 gsplist="$HOME/Library/LaunchAgents/com.cmux-group-sync.plist"
 bak "$gsplist"
 sed "s#/Users/YOUR_USERNAME#$HOME#g" "$here/examples/com.cmux-group-sync.plist" > "$gsplist"
@@ -178,6 +187,31 @@ if [ "${WITH_ZED:-0}" = "1" ] || [ -f "$HOME/.claude/hooks/zed-bridge.sh" ]; the
     SessionStart UserPromptSubmit PreToolUse PreCompact PostCompact \
     Notification Stop SessionEnd
   ZED_INSTALLED=1
+fi
+
+# 5c. Amp integration (opt-in via --with-amp / WITH_AMP=1). Mirrors the blocks
+#     above: also refreshes an already-installed amp bridge on a plain re-run.
+#     Amp has no shell hooks — it has a Bun/TypeScript PLUGIN system — so this is
+#     a *.ts file dropped into amp's plugin dir (amp auto-loads every *.ts there;
+#     no manifest, no registration step). It is a thin adapter that shells out to
+#     cmux-bridge.sh, so it REQUIRES that bridge: installing amp support without
+#     it would give a plugin that silently no-ops.
+#
+#     This is NOT a replacement for `cmux hooks amp install` — that one is cmux's
+#     own plugin (native tab-status pills + session restore) and lives alongside
+#     as a separate file. Install BOTH: cmux's for the native UI, this one for the
+#     custom sidebar, which set-status provably cannot reach.
+if [ "${WITH_AMP:-0}" = "1" ] || [ -f "$HOME/.config/amp/plugins/cmux-sentinel-amp.ts" ]; then
+  if [ ! -f "$HOME/.claude/hooks/cmux-bridge.sh" ]; then
+    bak "$HOME/.claude/hooks/cmux-bridge.sh"
+    install -m 0755 "$here/hooks/cmux-bridge.sh" "$HOME/.claude/hooks/cmux-bridge.sh"
+    echo "  -> ~/.claude/hooks/cmux-bridge.sh  (required by the amp plugin)"
+  fi
+  mkdir -p "$HOME/.config/amp/plugins"
+  bak "$HOME/.config/amp/plugins/cmux-sentinel-amp.ts"
+  install -m 0644 "$here/hooks/amp-bridge.ts" "$HOME/.config/amp/plugins/cmux-sentinel-amp.ts"
+  echo "  -> ~/.config/amp/plugins/cmux-sentinel-amp.ts"
+  AMP_INSTALLED=1
 fi
 
 cat <<'NEXT'
@@ -250,4 +284,23 @@ if [ "${ZED_INSTALLED:-0}" = "1" ]; then
    Optional: run ~/bin/zed-usage-tui.sh in a Zed terminal pane for the usage meters.
    Full guide + all the toggles: docs/zed-integration.md
 ZED
+fi
+
+# Extra steps only when the Amp bridge was just installed. Same pattern as Zed:
+# kept out of the main heredoc so a default install never mentions Amp.
+if [ "${AMP_INSTALLED:-0}" = "1" ]; then
+  cat <<AMP
+
+🔌 Amp bridge installed → ~/.config/amp/plugins/cmux-sentinel-amp.ts
+   Amp picks it up on its next start (or run \`amp plugins reload\`); verify with
+   \`amp plugins list\`. Amp workspaces now show ⚡ working / idle in the sentinel
+   sidebar. Two things it deliberately does NOT do: ⏳ compacting (Amp emits no
+   such event) and ❓ waiting-on-you (Amp doesn't ask permission by default — opt
+   in with CMUX_SENTINEL_AMP_ASK=1, which makes Amp start prompting).
+
+   ALSO run  cmux hooks amp install  if you haven't. That is cmux's own separate
+   plugin for the NATIVE sidebar's status pills, notifications and session
+   restore; this one is for the custom sidebar, which those pills cannot reach.
+   They coexist as two files — never edit cmux's cmux-session.ts, it self-upgrades.
+AMP
 fi

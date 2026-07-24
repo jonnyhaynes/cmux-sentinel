@@ -47,10 +47,19 @@ die() { echo "ERR: $*" >&2; exit 1; }
 windows() { cmux list-windows --json 2>/dev/null | jq -r '.[].id // empty' 2>/dev/null; }
 
 # Groups in one window as TSV "name\tanchor_ref", skipping unnamed groups (an
-# empty name must never overwrite an anchor's title).
+# empty name must never overwrite an anchor's title) and ANCHORLESS ones.
+#
+# Both guards live in jq on purpose. A null/missing anchor_workspace_ref cannot be
+# caught downstream: jq's string interpolation renders it as the literal text
+# "null", which is non-empty, so a bash `[ -n "$anchor" ]` test PASSES and we'd go
+# on to rename a workspace with the ref `null`. Empty groups (cmux 0.64.18 added
+# entrypoints to create them) are the case that makes an anchorless group reachable.
 groups_in_window() { # $1 = window id
   cmux workspace-group list --window "$1" --json 2>/dev/null \
-    | jq -r '.groups[]? | select(.name != null and .name != "") | "\(.name)\t\(.anchor_workspace_ref)"' 2>/dev/null
+    | jq -r '.groups[]?
+             | select(.name != null and .name != "")
+             | select(.anchor_workspace_ref != null and .anchor_workspace_ref != "")
+             | "\(.name)\t\(.anchor_workspace_ref)"' 2>/dev/null
 }
 
 # Current title of a ref within a window's workspace list (passed as JSON in $2 to

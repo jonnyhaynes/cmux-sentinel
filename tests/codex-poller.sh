@@ -42,6 +42,10 @@ case "$1" in
       while [ $# -gt 0 ]; do case "$1" in --window) win="$2"; shift 2 ;; *) shift ;; esac; done
       if [ -n "${STUB_MULTIWIN:-}" ]; then
         [ "$win" = "win-b" ] && printf '%s\n' "$SENT" || printf '{"workspaces":[]}\n'
+      elif [ -n "${STUB_NO_CX5H:-}" ]; then
+        # cx5h deliberately absent — setup skips creating a sentinel for a window the
+        # account doesn't have (OpenAI dropped 5h for Pro). The steady state, not a fault.
+        printf '{"workspaces":[{"title":"cx7d","ref":"workspace:2"}]}\n'
       else
         printf '{"workspaces":[{"title":"cx5h","ref":"workspace:1"},{"title":"cx7d","ref":"workspace:2"}]}\n'
       fi
@@ -112,6 +116,8 @@ ckhas()  { if grep -q -- "$2" "$RENAMES" 2>/dev/null; then pass=$((pass + 1)); p
            else fail=$((fail + 1)); printf '  ✗ %s — [%s] not in:\n%s\n' "$1" "$2" "$(cat "$RENAMES" 2>/dev/null)"; fi; }
 ckprog() { if grep -q -- "$2" "$PROGRESS" 2>/dev/null; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
            else fail=$((fail + 1)); printf '  ✗ %s — [%s] not in progress log:\n%s\n' "$1" "$2" "$(cat "$PROGRESS" 2>/dev/null)"; fi; }
+ckout()  { if [ "$2" = "$3" ]; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
+           else fail=$((fail + 1)); printf '  ✗ %s — stdout got [%s] want [%s]\n' "$1" "$2" "$3"; fi; }
 reset()  { rm -f "$RENAMES" "$PROGRESS"; }
 
 echo "T1: disabled (USAGE_PROVIDERS without codex) → exit 0, writes nothing"
@@ -179,6 +185,53 @@ reset; auth_chatgpt
 STUB_CURL=ok STUB_SWAP=1 STUB_P5=22 STUB_P7=8 USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "swapped --update" "$?" 0
 ckhas "cx5h gets the 5h pct (22%) despite living in secondary_window" "cx5h.*22%"
 ckhas "cx7d gets the weekly pct (8%) despite living in primary_window" "cx7d.*8%"
+
+echo "T10: --buckets reports the windows the account HAS (drives sentinel creation)"
+# cmux-sentinel-setup.sh reads this to skip a sentinel for a window that doesn't
+# exist (a dead 'n/a' row still eats a ⌘ key). The FAIL-OPEN half matters most:
+# every can't-tell path must print NOTHING, because setup reads empty as "create
+# both" — so an expired token or a flaky network can never suppress a real meter.
+reset; auth_chatgpt
+out=$(STUB_CURL=ok STUB_P5=7 STUB_P7=3 USAGE_PROVIDERS="claude codex" bash "$POLLER" --buckets 2>/dev/null)
+ckcode "--buckets both windows" "$?" 0
+ckout "both windows → both labels" "$out" "cx5h
+cx7d"
+ckno "--buckets writes no renames (read-only)"
+
+reset; auth_chatgpt
+out=$(STUB_CURL=ok STUB_WEEKLY_ONLY=1 STUB_P7=4 USAGE_PROVIDERS="claude codex" bash "$POLLER" --buckets 2>/dev/null)
+ckout "weekly-only (today's Pro shape) → cx7d only, no cx5h" "$out" "cx7d"
+
+reset; auth_chatgpt
+out=$(STUB_CURL=fail USAGE_PROVIDERS="claude codex" bash "$POLLER" --buckets 2>/dev/null)
+ckout "fail-open: offline/expired prints nothing (setup keeps both)" "$out" ""
+
+reset; no_auth
+out=$(STUB_CURL=ok USAGE_PROVIDERS="claude codex" bash "$POLLER" --buckets 2>/dev/null)
+ckout "fail-open: not logged in prints nothing" "$out" ""
+
+reset; auth_chatgpt
+out=$(STUB_CURL=ok STUB_NOWINDOWS=1 USAGE_PROVIDERS="claude codex" bash "$POLLER" --buckets 2>/dev/null)
+ckout "fail-open: schema change (no windows) prints nothing" "$out" ""
+
+echo "T11: absent window + absent sentinel → quiet no-op (the post-gate steady state)"
+# Once setup skips cx5h (no 5h window on Codex Pro), the poller must NOT treat the
+# missing sentinel as a misconfiguration — launchd runs this every 5 min and would
+# otherwise fail forever over a meter that's correctly absent.
+reset; auth_chatgpt
+STUB_CURL=ok STUB_WEEKLY_ONLY=1 STUB_P7=6 STUB_NO_CX5H=1 \
+  USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "n/a bucket, no sentinel → exit 0" "$?" 0
+ckhas "cx7d still painted" "cx7d.*6%"
+if grep -q "cx5h" "$RENAMES" 2>/dev/null; then
+  fail=$((fail + 1)); printf '  ✗ wrote a cx5h rename despite no cx5h sentinel\n'
+else pass=$((pass + 1)); printf '  ✓ no cx5h write attempted\n'; fi
+
+echo "T12: LIVE window + absent sentinel → still a hard error (real misconfiguration)"
+# The other half of the rule: tolerating a missing sentinel must not mask a genuinely
+# broken install where the window DOES exist and the meter is simply missing.
+reset; auth_chatgpt
+STUB_CURL=ok STUB_P5=44 STUB_P7=9 STUB_NO_CX5H=1 \
+  USAGE_PROVIDERS="claude codex" bash "$POLLER" --update 2>/dev/null; ckcode "live window, no sentinel → dies" "$?" 1
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

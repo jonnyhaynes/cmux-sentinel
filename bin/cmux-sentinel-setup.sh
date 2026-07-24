@@ -5,7 +5,9 @@
 # typo'd label = a silently blank panel). This does it for you: for each ENABLED
 # provider (USAGE_PROVIDERS, default "claude") it creates an idle workspace titled
 # with the right label and a "managed by …" description — but only if one doesn't
-# already exist (resolved by title across ALL windows), so re-running is safe.
+# already exist (resolved by title across ALL windows), so re-running is safe. It
+# also skips a window the provider doesn't actually HAVE (Codex asks the poller via
+# `--buckets`; see "ensure_live") so you don't get a permanently-"n/a" meter.
 #
 # It also PARKS the sentinels so they don't steal ⌘1…⌘9 (see "shortcut layout"
 # below). It does NOT update the bars (that's the poller's job) and never closes
@@ -30,6 +32,7 @@ SENTINELS_ENV="$CFG/usage-sentinels.env"
 [ -f "$SENTINELS_ENV" ] && . "$SENTINELS_ENV"
 LABEL_5H="${SENTINEL_5H_LABEL:-5h}";   LABEL_7D="${SENTINEL_7D_LABEL:-7d}"
 LABEL_CX5H="${SENTINEL_CX5H_LABEL:-cx5h}"; LABEL_CX7D="${SENTINEL_CX7D_LABEL:-cx7d}"
+LABEL_AMPU="${SENTINEL_AMPU_LABEL:-ampu}"; LABEL_AMPO="${SENTINEL_AMPO_LABEL:-ampo}"
 PROVIDERS="${USAGE_PROVIDERS:-claude}"
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -61,14 +64,52 @@ ensure() { # $1 = label  $2 = description
   fi
 }
 
+# A provider may not HAVE every window we model: OpenAI dropped the 5h window for
+# Codex Pro (2026-07-13; still gone with fresh usage 2026-07-16), so creating cx5h
+# parks a permanently-"n/a" row — and a sentinel is an ordinary workspace, so it eats
+# one of the ⌘1…⌘9 keys to show nothing. So ASK the poller which windows are live
+# (`--buckets`) instead of hardcoding it here; the meter reappears by itself if
+# OpenAI ever restores the window.
+#
+# Fail-open by design: the poller prints nothing when it can't tell (offline,
+# expired token, not logged in, schema change), and empty means "create both" — the
+# pre-existing behaviour. Only a POSITIVE answer ever suppresses a sentinel, so a
+# flaky network can't quietly cost you a meter.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CODEX_POLLER="${CODEX_POLLER:-$SELF_DIR/cmux-codex-usage.sh}"
+AMP_POLLER="${AMP_POLLER:-$SELF_DIR/cmux-amp-usage.sh}"
+
+live_buckets() { # $1 = poller path — echoes live labels, or nothing if undeterminable
+  [ -x "$1" ] || return 0
+  "$1" --buckets 2>/dev/null
+}
+
+ensure_live() { # $1 = label  $2 = description  $3 = live labels ("" = undetermined)
+  if [ -n "$3" ] && ! printf '%s\n' "$3" | grep -qxF -- "$1"; then
+    echo "  – skipping '$1' — the provider reports no such window (would be a dead 'n/a' row)"
+    return 0
+  fi
+  ensure "$1" "$2"
+}
+
 echo "cmux-sentinel setup — providers: $PROVIDERS"
 case " $PROVIDERS " in *" claude "*)
   ensure "$LABEL_5H" "Claude 5-hour rate meter — managed by cmux-claude-usage.sh; leave idle"
   ensure "$LABEL_7D" "Claude weekly rate meter — managed by cmux-claude-usage.sh; leave idle"
   ;; esac
 case " $PROVIDERS " in *" codex "*)
-  ensure "$LABEL_CX5H" "Codex 5-hour rate meter — managed by cmux-codex-usage.sh; leave idle"
-  ensure "$LABEL_CX7D" "Codex weekly rate meter — managed by cmux-codex-usage.sh; leave idle"
+  cx_live=$(live_buckets "$CODEX_POLLER")
+  ensure_live "$LABEL_CX5H" "Codex 5-hour rate meter — managed by cmux-codex-usage.sh; leave idle" "$cx_live"
+  ensure_live "$LABEL_CX7D" "Codex weekly rate meter — managed by cmux-codex-usage.sh; leave idle" "$cx_live"
+  ;; esac
+# Amp meters a MONTHLY subscription allowance, not rolling windows. Same
+# fail-open --buckets contract as Codex; additionally the poller only lists
+# "ampo" when AMP_ORB_METER=1, so the opt-in orb meter is skipped here by simply
+# never appearing in the live list — no separate branch needed.
+case " $PROVIDERS " in *" amp "*)
+  amp_live=$(live_buckets "$AMP_POLLER")
+  ensure_live "$LABEL_AMPU" "Amp subscription usage meter — managed by cmux-amp-usage.sh; leave idle" "$amp_live"
+  ensure_live "$LABEL_AMPO" "Amp orb usage meter — managed by cmux-amp-usage.sh; leave idle" "$amp_live"
   ;; esac
 
 # ── shortcut layout ───────────────────────────────────────────────────────────
@@ -95,7 +136,7 @@ case " $PROVIDERS " in *" codex "*)
 # Every label the sidebar hides — including disabled providers' leftovers, which
 # still exist as workspaces and still eat ⌘ keys. Array, not a string: a label is
 # user-configurable and could contain a space.
-ALL_LABELS=("$LABEL_5H" "$LABEL_7D" "$LABEL_CX5H" "$LABEL_CX7D")
+ALL_LABELS=("$LABEL_5H" "$LABEL_7D" "$LABEL_CX5H" "$LABEL_CX7D" "$LABEL_AMPU" "$LABEL_AMPO")
 labels_json() { printf '%s\n' "${ALL_LABELS[@]}" | jq -R . | jq -s .; }
 
 ws_json() { # $1 = window ("" = default)
@@ -182,5 +223,6 @@ echo
 echo "Next — paint the bars and reload:"
 case " $PROVIDERS " in *" claude "*) echo "  ~/bin/cmux-claude-usage.sh --update"; esac
 case " $PROVIDERS " in *" codex "*)  echo "  ~/bin/cmux-codex-usage.sh --update"; esac
+case " $PROVIDERS " in *" amp "*)    echo "  ~/bin/cmux-amp-usage.sh --update"; esac
 echo "  cmux sidebar reload"
 exit "$rc"

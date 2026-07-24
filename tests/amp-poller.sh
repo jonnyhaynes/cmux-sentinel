@@ -1,0 +1,232 @@
+#!/bin/bash
+# amp-poller.sh — offline test for bin/cmux-amp-usage.sh.
+#
+# The Amp poller scrapes `amp usage` PROSE (Amp ships no --json), so the value of
+# this test is mostly in the parser: it pins the REMAINING→USED inversion, the
+# phrase-anchored (not position-anchored) extraction, and the rule that anything
+# unparseable becomes "offline" rather than a fabricated 0%. Stubs `amp`, `cmux`
+# and a throwaway $HOME, so it runs in CI on Linux with no Amp installed.
+#
+# Run:  make test   (or:  bash tests/amp-poller.sh)
+set -u
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+POLLER="${POLLER:-$HERE/../bin/cmux-amp-usage.sh}"
+[ -f "$POLLER" ] || { echo "poller not found: $POLLER" >&2; exit 2; }
+
+JQ="$(command -v jq)" || { echo "jq required for this test" >&2; exit 2; }
+
+ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cmux-amp-test.XXXXXX")"
+trap 'rm -rf "$ROOT"' EXIT
+mkdir -p "$ROOT/bin" "$ROOT/home/.config/cmux" "$ROOT/home/.local/share/amp"
+
+# Fake cmux: ping ok; workspace list serves both amp sentinels with their BARE
+# labels (the real first-run state the poller must resolve to bootstrap them);
+# rename + set-progress log what they were given.
+cat > "$ROOT/bin/cmux" <<'FAKE'
+#!/bin/bash
+LOG="$AMPTEST/.renames"
+PLOG="$AMPTEST/.progress"
+case "$1" in
+  ping) exit 0 ;;
+  list-windows) exit 0 ;;
+  workspace)
+    if [ "$2" = "list" ]; then
+      if [ -n "${STUB_NO_AMPO:-}" ]; then
+        printf '{"workspaces":[{"title":"ampu","ref":"workspace:1"}]}\n'
+      else
+        printf '{"workspaces":[{"title":"ampu","ref":"workspace:1"},{"title":"ampo","ref":"workspace:2"}]}\n'
+      fi
+    fi
+    exit 0 ;;
+  rename-workspace)
+    shift; title=""
+    while [ $# -gt 0 ]; do case "$1" in --workspace|--window) shift 2 ;; *) title="$1"; shift ;; esac; done
+    printf '%s\n' "$title" >> "$LOG"; exit 0 ;;
+  set-progress)
+    shift; printf '%s\n' "$1" >> "$PLOG"; exit 0 ;;
+  clear-progress) printf 'CLEARED\n' >> "$PLOG"; exit 0 ;;
+esac
+exit 0
+FAKE
+chmod +x "$ROOT/bin/cmux"
+
+# Fake amp: prints whatever fixture $AMP_FIXTURE names; exit 1 for "logged out".
+cat > "$ROOT/bin/amp" <<'FAKE'
+#!/bin/bash
+[ "${AMP_FAIL:-0}" = "1" ] && exit 1
+[ "$1" = "usage" ] || exit 0
+printf '%s\n' "$AMP_FIXTURE"
+FAKE
+chmod +x "$ROOT/bin/amp"
+
+ln -sf "$JQ" "$ROOT/bin/jq"
+export AMPTEST="$ROOT"
+PATH="$ROOT/bin:/usr/bin:/bin"
+export PATH
+
+# Credentials present = "logged in" (existence only; never read).
+echo '{"stub":"not-a-real-secret"}' > "$ROOT/home/.local/share/amp/secrets.json"
+
+pass=0; fail=0
+ok()   { pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
+bad()  { fail=$((fail+1)); printf '  FAIL %s\n' "$1"; }
+is()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
+has()  { if printf '%s' "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
+hasnt(){ if printf '%s' "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+
+# Real-world fixtures, byte-for-byte the shape amp 0.0.1784… prints. The "$0"/"$14"
+# are literal dollar AMOUNTS in amp's own output, not shell expansions — single
+# quotes keep them literal, which is exactly what we want.
+# shellcheck disable=SC2016
+FRESH='Signed in as user@example.com (someone)
+Subscription Gigawatt: 100% other usage and 100% orb usage remaining - resets upon renewal in 1 month
+Workspace demo: $0 remaining - https://ampcode.com/workspaces/demo'
+
+# shellcheck disable=SC2016
+PARTIAL='Signed in as user@example.com (someone)
+Subscription Gigawatt: 23% other usage and 71% orb usage remaining - resets upon renewal in 12 days
+Workspace demo: $14 remaining - https://ampcode.com/workspaces/demo'
+
+run() { # $1=mode  ... env passed by caller
+  HOME="$ROOT/home" \
+  AMP_SECRETS_JSON="$ROOT/home/.local/share/amp/secrets.json" \
+  AMPTEST="$ROOT" \
+  bash "$POLLER" "$1" 2>&1
+}
+# STDOUT ONLY. --buckets' fail-open contract is specifically about stdout: every
+# can't-tell path must print no LABELS there, while still explaining itself on
+# stderr. Merging the two (as run() does) would hide a real regression behind the
+# diagnostic text, so bucket assertions must use this.
+run_out() { # $1=mode
+  HOME="$ROOT/home" \
+  AMP_SECRETS_JSON="$ROOT/home/.local/share/amp/secrets.json" \
+  AMPTEST="$ROOT" \
+  bash "$POLLER" "$1" 2>/dev/null
+}
+cfg() { printf '%s\n' "$@" > "$ROOT/home/.config/cmux/usage-sentinels.env"; }
+reset_logs() { : > "$ROOT/.renames"; : > "$ROOT/.progress"; }
+
+echo "amp-poller: gating"
+
+cfg 'USAGE_PROVIDERS="claude"'
+out=$(AMP_FIXTURE="$FRESH" run --print); rc=$?
+is  "disabled provider exits 0" "$rc" "0"
+has "disabled provider says so" "$out" "amp disabled"
+hasnt "disabled provider draws nothing" "$out" "%"
+
+cfg 'USAGE_PROVIDERS="claude amp"'
+mv "$ROOT/home/.local/share/amp/secrets.json" "$ROOT/secrets.bak"
+out=$(AMP_FIXTURE="$FRESH" run --print); rc=$?
+is  "no credentials exits 0" "$rc" "0"
+has "no credentials says so"  "$out" "nothing to meter"
+mv "$ROOT/secrets.bak" "$ROOT/home/.local/share/amp/secrets.json"
+
+echo "amp-poller: parsing (the REMAINING→USED inversion)"
+
+# The bug this test exists to prevent: a brand-new subscription is 100% REMAINING,
+# which must render as 0% USED — an empty bar, not a full one.
+out=$(AMP_FIXTURE="$FRESH" run --print)
+has "fresh 100% remaining → 0% used" "$out" "ampu: 0% used"
+hasnt "fresh subscription is NOT 100% used" "$out" "ampu: 100% used"
+
+out=$(AMP_FIXTURE="$PARTIAL" run --print)
+has "23% remaining → 77% used"  "$out" "ampu: 77% used"
+has "71% orb remaining → 29% used" "$out" "ampo: 29% used"
+has "reset phrase is amp's own" "$out" "resets in 12 days"
+
+echo "amp-poller: parsing is phrase-anchored, not position-anchored"
+
+# Same numbers, sentence reworded and reordered. A position/field-index parser
+# breaks here; a phrase-anchored one does not. This is the whole defence against
+# Amp rewording its own output in a release.
+REWORDED='Signed in as user@example.com (someone)
+Plan Terawatt — you still have 71% orb usage and 23% other usage remaining, resets upon renewal in 12 days'
+out=$(AMP_FIXTURE="$REWORDED" run --print)
+has "reworded+reordered still 77% used" "$out" "ampu: 77% used"
+has "reworded+reordered orb still 29%"  "$out" "ampo: 29% used"
+
+# Decimals must not blow up the integer math.
+DECIMAL='Subscription X: 99.5% other usage and 0.4% orb usage remaining - resets upon renewal in 3 days'
+out=$(AMP_FIXTURE="$DECIMAL" run --print)
+has "decimal remaining rounds"      "$out" "ampu: 0% used"
+has "decimal orb rounds to 100 used" "$out" "ampo: 100% used"
+
+echo "amp-poller: unparseable → offline, never a fake 0%"
+
+# shellcheck disable=SC2016
+NOSUB='Signed in as user@example.com (someone)
+Workspace demo: $14 remaining - https://ampcode.com/workspaces/demo'
+out=$(AMP_FIXTURE="$NOSUB" run --print); rc=$?
+is  "no subscription line exits non-zero" "$rc" "1"
+has "no subscription line explains why"   "$out" "could not parse"
+hasnt "no subscription line never says 0% used" "$out" "0% used"
+
+reset_logs
+out=$(AMP_FIXTURE="$NOSUB" run --update)
+has "unparseable --update marks offline" "$(cat "$ROOT/.renames")" "⚠ no data"
+has "unparseable --update clears the bar" "$(cat "$ROOT/.progress")" "CLEARED"
+
+reset_logs
+out=$(AMP_FIXTURE="$FRESH" AMP_FAIL=1 run --update)
+has "amp usage failure marks offline" "$(cat "$ROOT/.renames")" "⚠ offline"
+
+echo "amp-poller: --update paints the meter"
+
+reset_logs
+AMP_FIXTURE="$PARTIAL" run --update >/dev/null
+renames="$(cat "$ROOT/.renames")"
+has "title keeps the label anchor"  "$renames" "ampu "
+has "title carries the used pct"    "$renames" "77%"
+has "title carries the reset"       "$renames" "12 days"
+has "title has a unicode bar"       "$renames" "█"
+has "77% used gets the amber dot"   "$renames" "🟡"
+is  "progress fraction is 0..1"     "$(head -1 "$ROOT/.progress")" "0.77"
+
+# Severity thresholds ride USED, so a nearly-exhausted allowance goes red.
+CRIT='Subscription X: 3% other usage and 100% orb usage remaining - resets upon renewal in 2 days'
+reset_logs
+AMP_FIXTURE="$CRIT" run --update >/dev/null
+has "97% used gets the red dot" "$(cat "$ROOT/.renames")" "🔴"
+
+echo "amp-poller: the orb meter costs a ⌘ key, so it is opt-in"
+
+out=$(AMP_FIXTURE="$FRESH" run_out --buckets)
+is  "default buckets = ampu only" "$out" "ampu"
+out=$(cfg 'USAGE_PROVIDERS="claude amp"' 'AMP_ORB_METER=1'; AMP_FIXTURE="$FRESH" run_out --buckets)
+is  "AMP_ORB_METER=1 adds ampo" "$out" "$(printf 'ampu\nampo')"
+
+# With orb off, the ampo sentinel must never be painted even though it exists.
+cfg 'USAGE_PROVIDERS="claude amp"'
+reset_logs
+AMP_FIXTURE="$PARTIAL" run --update >/dev/null
+hasnt "orb off → ampo never painted" "$(cat "$ROOT/.renames")" "ampo"
+
+# A missing sentinel for a bucket we don't meter is the intended steady state.
+cfg 'USAGE_PROVIDERS="claude amp"'
+reset_logs
+out=$(STUB_NO_AMPO=1 AMP_FIXTURE="$PARTIAL" run --update); rc=$?
+is "missing ampo sentinel is a quiet no-op" "$rc" "0"
+
+echo "amp-poller: --buckets fails open (a flaky run may never delete a meter)"
+
+out=$(AMP_FIXTURE="$FRESH" AMP_FAIL=1 run_out --buckets)
+is "amp failure prints NO buckets" "$out" ""
+out=$(AMP_FIXTURE="$NOSUB" run_out --buckets)
+is "unparseable prints NO buckets" "$out" ""
+cfg 'USAGE_PROVIDERS="claude"'
+out=$(AMP_FIXTURE="$FRESH" run_out --buckets)
+is "disabled prints NO buckets" "$out" ""
+
+echo "amp-poller: --raw"
+
+cfg 'USAGE_PROVIDERS="claude amp"'
+out=$(AMP_FIXTURE="$PARTIAL" run --raw)
+has "--raw passes output through" "$out" "23% other usage"
+reset_logs
+AMP_FIXTURE="$PARTIAL" run --raw >/dev/null
+is "--raw makes no cmux writes" "$(cat "$ROOT/.renames")" ""
+
+echo
+printf 'amp-poller: %d passed, %d failed\n' "$pass" "$fail"
+[ "$fail" -eq 0 ]

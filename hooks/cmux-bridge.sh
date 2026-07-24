@@ -2,9 +2,14 @@
 # cmux-bridge.sh — Bridge Claude Code hooks to the cmux custom sidebar.
 # All calls are fire-and-forget; this script must never block Claude.
 #
-# WORKING-STATE CHANNEL: cmux does NOT pass `progress`/`description`/`color` to
-# custom-sidebar data on this build (proven by in-sidebar probe — progN=0). The
-# ONLY field that reaches the sidebar is the TITLE. So agent activity rides a
+# WORKING-STATE CHANNEL: agent activity rides the TITLE, and that is a PERSISTENCE
+# + PRECEDENCE choice, not a channel limit — `progress`/`description`/`color` do
+# all reach custom-sidebar data (re-probed 2026-07-20; the older "they don't" note
+# here was wrong, it read workspaces where they were simply never set). The title
+# is used because it survives restarts, is what `resolve_ref` anchors on, and
+# collapses three mutually-exclusive states into one ordered slot. cmux's own
+# `set-status` pills are NOT an option: they never reach a custom sidebar at all.
+# So agent activity rides a
 # STATIC marker kept at the FRONT of the workspace title; the sidebar detects it
 # (`title.hasPrefix(...)`), styles the row, and strips the glyph for display:
 #
@@ -49,8 +54,20 @@ COMPMARK="⏳"
 WAITMARK="❓"
 WORKROOT="${TMPDIR:-/tmp}/cmux-sentinel-work"
 
+# AGENT-AGNOSTIC IDENTITY. The state machine below is not Claude-specific — the
+# markers, ref-counting and precedence apply to any agent that can emit these
+# events. Three knobs let another agent's adapter (hooks/amp-bridge.ts, or
+# `cmux hooks codex` pointed here) reuse it verbatim, sharing ONE $WORKROOT so
+# co-tenant agents in the same workspace ref-count against each other correctly:
+#   CMUX_SENTINEL_SESSION_PID   this session's pid (liveness/reap key)
+#   CMUX_SENTINEL_AGENT_LABEL   notification title
+#   CMUX_SENTINEL_LOG_SOURCE    `cmux log --source` tag + status-key prefix
+# Defaults keep Claude Code's existing behaviour byte-identical.
+AGENT_LABEL="${CMUX_SENTINEL_AGENT_LABEL:-Claude Code}"
+LOG_SOURCE="${CMUX_SENTINEL_LOG_SOURCE:-cc}"
+
 _ws()    { printf '%s' "${CMUX_WORKSPACE_ID:-}"; }
-_sess()  { printf '%s' "${CMUX_CLAUDE_PID:-$PPID}"; }
+_sess()  { printf '%s' "${CMUX_SENTINEL_SESSION_PID:-${CMUX_CLAUDE_PID:-$PPID}}"; }
 _alive() { kill -0 "$1" 2>/dev/null; }
 
 # The .marked fast-path flag is trusted only while FRESH (< TTL old). This bounds
@@ -234,7 +251,7 @@ _sweep_orphan_marks() {
 case "$event" in
   SessionStart)
     src=$(echo "$input" | jq -r '.source // "startup"')
-    cmux log --level info --source cc -- "Session $src" &>/dev/null
+    cmux log --level info --source "$LOG_SOURCE" -- "Session $src" &>/dev/null
     _reconcile_all       # re-derive markers for workspaces we still track
     _sweep_orphan_marks  # strip markers stranded by a $TMPDIR wipe (reboot)
     ;;
@@ -252,28 +269,28 @@ case "$event" in
 
   PreCompact)
     _set_compacting
-    cmux log --level info --source cc -- "Compacting context" &>/dev/null
+    cmux log --level info --source "$LOG_SOURCE" -- "Compacting context" &>/dev/null
     ;;
 
   PostCompact)
     _clear_compacting
-    cmux log --level info --source cc -- "Context compacted" &>/dev/null
+    cmux log --level info --source "$LOG_SOURCE" -- "Context compacted" &>/dev/null
     ;;
 
   Stop)
     _clear_working
-    cmux notify --title "Claude Code" --body "Finished responding" &>/dev/null
-    cmux log --level success --source cc -- "Response complete" &>/dev/null
+    cmux notify --title "$AGENT_LABEL" --body "Finished responding" &>/dev/null
+    cmux log --level success --source "$LOG_SOURCE" -- "Response complete" &>/dev/null
     ;;
 
   StopFailure)
     # Don't decrement on a (usually transient) failure: a retry re-asserts via
     # PreToolUse, and a truly-dead session is reaped by PID liveness. Just surface it.
     error=$(echo "$input" | jq -r '.error // "unknown error"' | head -c 100)
-    cmux set-status cc_error "Error: $error" --icon exclamationmark.triangle --color "#FF3B30" &>/dev/null
-    cmux notify --title "Claude Code Error" --body "$error" &>/dev/null
-    cmux log --level error --source cc -- "Stop failure: $error" &>/dev/null
-    (sleep 60 && cmux clear-status cc_error &>/dev/null) &
+    cmux set-status "${LOG_SOURCE}_error" "Error: $error" --icon exclamationmark.triangle --color "#FF3B30" &>/dev/null
+    cmux notify --title "$AGENT_LABEL Error" --body "$error" &>/dev/null
+    cmux log --level error --source "$LOG_SOURCE" -- "Stop failure: $error" &>/dev/null
+    (sleep 60 && cmux clear-status "${LOG_SOURCE}_error" &>/dev/null) &
     ;;
 
   Notification)
@@ -283,7 +300,7 @@ case "$event" in
     # way, surface the OS notification. Known minor lag: a permission prompt
     # approved into a long-running tool keeps ❓ until that tool's next hook fires.
     _notify_waiting
-    title=$(echo "$input" | jq -r '.title // "Claude Code"')
+    title=$(echo "$input" | jq -r ".title // \"$AGENT_LABEL\"")
     message=$(echo "$input" | jq -r '.message // ""' | head -c 120)
     cmux notify --title "$title" --body "$message" &>/dev/null
     ;;
@@ -291,13 +308,13 @@ case "$event" in
   PostToolUseFailure)
     tool=$(echo "$input" | jq -r '.tool_name // "unknown"')
     error=$(echo "$input" | jq -r '.error // ""' | head -c 80)
-    cmux log --level error --source cc -- "$tool: $error" &>/dev/null
+    cmux log --level error --source "$LOG_SOURCE" -- "$tool: $error" &>/dev/null
     ;;
 
   SessionEnd)
-    cmux clear-status cc_error &>/dev/null
+    cmux clear-status "${LOG_SOURCE}_error" &>/dev/null
     _clear_working
-    cmux log --level info --source cc -- "Session ended" &>/dev/null
+    cmux log --level info --source "$LOG_SOURCE" -- "Session ended" &>/dev/null
     ;;
 esac
 
