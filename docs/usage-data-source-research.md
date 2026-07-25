@@ -1,29 +1,38 @@
 # Machine-Readable AI Usage Sources
 
-**Audited:** 2026-07-24.
+**Audited:** 2026-07-25.
 
 ## Codex
 
-Codex reads ChatGPT-plan quota from `GET /backend-api/wham/usage` (or `/api/codex/usage` for the
-Codex API base). This source is first-party and account-server-side, but it is an internal backend
-route rather than a documented public OpenAI API.
+Codex exposes a structured app-server RPC, `account/rateLimits/read`, with normalized `rateLimits`,
+optional `rateLimitsByLimitId`, and windows containing `usedPercent`, optional
+`windowDurationMins`, and optional `resetsAt`. The Codex TUI uses this same typed interface.
 
-Current Codex also exposes a structured app-server RPC, `account/rateLimits/read`, with normalized
-`rateLimits`, optional `rateLimitsByLimitId`, and windows containing `usedPercent`, optional
-`windowDurationMins`, and optional `resetsAt`. It is the strongest structured contract, but using it
-from this dependency-light shell poller would require starting and managing an app-server process
-and speaking its protocol around the same backend account request.
+Under the hood, the normal ChatGPT configuration reads quota from `GET /backend-api/wham/usage`
+(`/api/codex/usage` for the Codex API base). That source is first-party and account-server-side but
+is an internal backend route rather than a documented public OpenAI API. The app-server interface
+adds the supported ownership boundary: Codex resolves file/keyring auth, proactively refreshes
+managed ChatGPT tokens, supplies account headers, chooses the backend route, and normalizes the
+response. `codex login status` only reports the stored auth mode; it does not validate token health.
 
 Local rollout JSONL and SQLite are not reliable quota stores for `codex exec`: SQLite stores thread
 metadata/token totals, rate-limit snapshots are optional response events, and stale interactive
 rollouts can outlive current account state.
 
-**Decision:** keep the direct server-side request, strict schema validation, duration-based routing,
-and explicit unknown/offline states. Reconsider the app-server RPC only if cmux-sentinel adopts a
-long-lived integration process for another reason.
+**Decision:** use `account/rateLimits/read` through one short-lived stdio app server per poll. A
+FIFO keeps stdin open until the correlated response arrives, then the process exits; no daemon or
+new runtime dependency is required. Keep strict schema validation, duration-based routing, and
+explicit unknown/offline states. Never fall back to reading OAuth material or calling WHAM directly.
 
-Fixtures cover classic, swapped, weekly-only, short-only, malformed duration/percentage, relative
-reset, and expanded responses carrying unrelated credits/spend/additional limits.
+This replaced the direct request after a live expired-token incident on Codex 0.145.0: direct WHAM
+and the app-server RPC both correctly returned 401, while `codex login status` still said ChatGPT
+was logged in. A normal model request exposed the actionable cause—its refresh token had already
+been used and re-login was required. The RPC cannot repair an invalidated refresh token, but it can
+perform normal refreshes and surfaces the same honest offline state without duplicating auth logic.
+
+Fixtures cover the JSONL handshake, interleaved notifications, RPC errors, classic, swapped,
+weekly-only, short-only, malformed duration/percentage, and expanded responses carrying unrelated
+credits/spend/additional limits.
 
 Authoritative source references in <https://github.com/openai/codex>:
 

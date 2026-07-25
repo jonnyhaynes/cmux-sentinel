@@ -15,8 +15,9 @@
   <true/>
   <key>EnvironmentVariables</key>
   <dict>
+    <!-- launchd gets no login shell, so include common Codex CLI install paths. -->
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Applications/cmux.app/Contents/Resources/bin</string>
+    <string>/Users/YOUR_USERNAME/.local/bin:/Users/YOUR_USERNAME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Applications/cmux.app/Contents/Resources/bin</string>
     <key>HOME</key>
     <string>/Users/YOUR_USERNAME</string>
     <key>CMUX_SOCKET_PATH</key>

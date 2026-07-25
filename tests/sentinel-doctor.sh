@@ -13,7 +13,7 @@ JQ="$(command -v jq)" || { echo "jq required" >&2; exit 2; }
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cmux-doctor-test.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT
 HOME="$ROOT/home"; export HOME
-mkdir -p "$ROOT/bin" "$HOME/.config/cmux/sidebars" "$HOME/.codex" "$HOME/.local/share/amp"
+mkdir -p "$ROOT/bin" "$HOME/.config/cmux/sidebars" "$HOME/.local/share/amp"
 ln -s "$JQ" "$ROOT/bin/jq"
 mkdir -p "$HOME/.config/cmux-sentinel"
 cp "$HERE/../hooks/cmux-bridge.sh" "$HOME/.config/cmux-sentinel/cmux-bridge.sh"
@@ -31,9 +31,6 @@ JSON
 cat > "$HOME/.config/cmux/usage-sentinels.env" <<'ENV'
 USAGE_PROVIDERS="claude codex amp"
 ENV
-cat > "$HOME/.codex/auth.json" <<'JSON'
-{"auth_mode":"chatgpt","tokens":{"access_token":"fake","account_id":"acct"}}
-JSON
 printf '{"present":true}\n' > "$HOME/.local/share/amp/secrets.json"
 
 # The default list intentionally has no meters. Both sentinels live in win-b,
@@ -85,17 +82,27 @@ cat > "$ROOT/bin/launchctl" <<'FAKE'
 printf '%s\n' "${STUB_LAUNCHD_JOBS:-com.cmux-claude-usage}"
 exit 0
 FAKE
-cat > "$ROOT/bin/curl" <<'FAKE'
+cat > "$ROOT/bin/codex" <<'FAKE'
 #!/bin/bash
+if [ "${1:-}" = login ] && [ "${2:-}" = status ]; then
+  [ "${STUB_CODEX_AUTH:-chatgpt}" = chatgpt ] || { echo "Not logged in" >&2; exit 1; }
+  echo "Logged in using ChatGPT" >&2; exit 0
+fi
+[ "${1:-}" = app-server ] || exit 2
 # Codex capability intentionally unknown: doctor must retain the current layout.
-exit 1
+while IFS= read -r line; do
+  case "$(printf '%s' "$line" | jq -r '.id // empty')" in
+    0) printf '{"id":0,"result":{"userAgent":"fake","codexHome":"/tmp/fake","platformFamily":"unix","platformOs":"linux"}}\n' ;;
+    1) printf '{"id":1,"error":{"code":-32603,"message":"offline"}}\n' ;;
+  esac
+done
 FAKE
 cat > "$ROOT/bin/amp" <<'FAKE'
 #!/bin/bash
 [ "$1" = usage ] || exit 0
 printf '%s\n' 'Subscription Test: 88% other usage and 100% orb usage remaining - resets upon renewal in 1 month'
 FAKE
-chmod +x "$ROOT/bin/cmux" "$ROOT/bin/security" "$ROOT/bin/launchctl" "$ROOT/bin/curl" "$ROOT/bin/amp"
+chmod +x "$ROOT/bin/cmux" "$ROOT/bin/security" "$ROOT/bin/launchctl" "$ROOT/bin/codex" "$ROOT/bin/amp"
 
 PATH="$ROOT/bin:/usr/bin:/bin"; export PATH
 out="$(bash "$DOCTOR" 2>&1)"; rc=$?
@@ -136,8 +143,8 @@ if has "com.cmux-amp-usage.plist"; then ok "Amp bootstrap path"; else bad "Amp b
 
 echo "T6: disabled/uninstalled providers do not produce launchd warnings"
 printf 'USAGE_PROVIDERS="claude"\n' > "$HOME/.config/cmux/usage-sentinels.env"
-rm -f "$HOME/.codex/auth.json" "$HOME/.local/share/amp/secrets.json"
-out2="$(bash "$DOCTOR" 2>&1)"
+rm -f "$HOME/.local/share/amp/secrets.json"
+out2="$(STUB_CODEX_AUTH=none bash "$DOCTOR" 2>&1)"
 if lacks "$out2" "codex poller not loaded"; then ok "disabled Codex has no launchd warning"; else bad "disabled Codex got launchd warning"; fi
 if lacks "$out2" "amp poller not loaded"; then ok "disabled Amp has no launchd warning"; else bad "disabled Amp got launchd warning"; fi
 case "$out2" in

@@ -147,8 +147,8 @@ cmux sidebar validate workspaces && cmux sidebar reload   # synthetic interpreta
 ./bin/cmux-claude-usage.sh --print     # parsed values
 ./bin/cmux-claude-usage.sh --raw       # raw API JSON (no token)
 ./bin/cmux-claude-usage.sh --update    # writes title fallback + native progress
-./bin/cmux-codex-usage.sh --print      # Codex: live utilization from ChatGPT wham/usage
-./bin/cmux-codex-usage.sh --raw        # raw wham/usage JSON (token NOT included)
+./bin/cmux-codex-usage.sh --print      # Codex: live utilization via account/rateLimits/read
+./bin/cmux-codex-usage.sh --raw        # normalized app-server rate-limit JSON (no token)
 ./bin/cmux-codex-usage.sh --update     # writes cx5h/cx7d title + progress (needs codex enabled)
 ./bin/cmux-codex-usage.sh --buckets    # which windows the account HAS (empty = can't tell); drives setup
 ./bin/cmux-amp-usage.sh --print        # Amp: monthly subscription allowance (scraped from `amp usage`)
@@ -160,9 +160,9 @@ cmux sidebar validate workspaces && cmux sidebar reload   # synthetic interpreta
 ./bin/cmux-group-sync.sh --update      # rename group anchors to the group name (needs GROUP_NAME_SYNC=1)
 
 # offline tests (stub cmux/security/curl/$HOME — run in CI too)
-make test   # bridge-state(36) poller-gate(34) codex-poller(63) install-hooks(35) sentinel-setup(50)
+make test   # bridge-state(36) poller-gate(34) codex-poller(66) install-hooks(35) sentinel-setup(50)
             # sentinel-doctor(23) group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(23)
-            # amp-bridge(43) amp-poller(45) = 414 assertions total
+            # amp-bridge(43) amp-poller(45) = 417 assertions total
 ```
 
 ## Architecture / where things live
@@ -170,7 +170,7 @@ make test   # bridge-state(36) poller-gate(34) codex-poller(63) install-hooks(35
 ```text
 sidebars/workspaces.swift  the sidebar. isClaudeMeter()/isCodexMeter()/isAmpMeter() = title-label `.hasPrefix` per provider; isUsageMeter() = any.
 bin/cmux-claude-usage.sh    Claude usage poller. make_bar / sev_dot / mark_offline / bucket_field / to_pct / resolve_ref(+_paint, multi-window).
-bin/cmux-codex-usage.sh     Codex usage poller (ChatGPT wham/usage endpoint; token from ~/.codex/auth.json). read_token / fetch_usage / make_bar / sev_dot / mark_offline / to_pct / resolve_ref(+_paint) / --buckets (live windows, for setup).
+bin/cmux-codex-usage.sh     Codex usage poller (short-lived account/rateLimits/read app-server RPC; Codex owns auth/refresh). fetch_usage / _rpc_wait_for_id / make_bar / sev_dot / mark_offline / to_pct / resolve_ref(+_paint) / --buckets (live windows, for setup).
 bin/cmux-amp-usage.sh       Amp usage poller (scrapes `amp usage` PROSE — no --json). Monthly allowance, not windows. REMAINING→USED inversion. ampu (agent) + ampo (orb, opt-in AMP_ORB_METER=1).
 bin/cmux-sentinel-setup.sh  idempotent sentinel creation (per USAGE_PROVIDERS; known-live buckets only, fail-open on unknown) + auto-naming guard probe + ⌘N shortcut layout (layout/sentinel_window, --no-layout).
 bin/cmux-sentinel-doctor.sh READ-ONLY wiring report: cmux/sidebar/bridge/auto-refresh, installed × enabled × sentinel per provider, ⌘N layout drift, snapshot data.
@@ -233,17 +233,21 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   "sentinel" workspace whose poller updates both native progress and a title anchor/fallback.
   **Three providers ship:** Claude
   (`bin/cmux-claude-usage.sh`, OAuth usage endpoint), Codex (`bin/cmux-codex-usage.sh`) and Amp
-  (`bin/cmux-amp-usage.sh` — CLI scrape, see its own bullet below). The first two
-  hit a provider **usage endpoint** with a locally-stored OAuth token: Codex reads ChatGPT's
-  `wham/usage` (the same endpoint the Codex CLI's own 60s poller hits — openai/codex#10869), token
-  read fresh from `~/.codex/auth.json` (`auth_mode=chatgpt`) → labels `cx5h`/`cx7d`. **Route
-  windows by `limit_window_seconds`, NEVER by primary/secondary POSITION** (<1d → `cx5h`,
-  ≥1d → `cx7d`) — OpenAI reshaped that twice in ~10 days. The OLD local-rollout source
+  (`bin/cmux-amp-usage.sh` — CLI scrape, see its own bullet below). Codex calls the supported
+  `account/rateLimits/read` app-server RPC through one short-lived stdio process per poll. Codex
+  owns file/keyring auth lookup, proactive OAuth refresh, account headers, backend routing, and
+  normalization; **no OAuth material enters the poller**. Under the hood current Codex still reads
+  ChatGPT's internal `wham/usage` route. The JSONL client keeps a FIFO open until the correlated
+  `id=1` response arrives because early stdin EOF races app-server shutdown; notifications may
+  interleave. **Route windows by `windowDurationMins`, NEVER by primary/secondary POSITION**
+  (<1d → `cx5h`, ≥1d → `cx7d`) — OpenAI reshaped that twice in ~10 days. The OLD local-rollout source
   (`~/.codex/sessions/**/rollout-*.jsonl`) is DEAD on codex-cli 0.142.x — `codex exec` (how Claude
   Code drives Codex) doesn't write `rate_limits` (openai/codex#14880) and fresh data moved to
   non-queryable sqlite, so the meter went weeks-stale; the endpoint is account-server-side, so it's
-  correct for any usage pattern. `wham/usage` is unofficial → parse defensively; API-key logins
-  aren't covered (and any existing sentinels must still be closed to hide their panel).
+  correct for any usage pattern. The app-server RPC is the strongest structured contract, but its
+  backend remains internal → parse defensively; API-key logins aren't covered (and any existing
+  sentinels must still be closed to hide their panel). `codex login status` only confirms a stored
+  auth mode, not token health; an invalidated refresh token still needs `codex logout` + re-login.
   Current source audit: `docs/usage-data-source-research.md`. Earlier decision record:
   `.claude/research/2026-07-06-codex-usage-api-source.md`. To add a FOURTH provider: create a
   sentinel, add an `isXMeter()` predicate + an `if isXMeter(w)` line to `isUsageMeter()` + an
@@ -276,7 +280,7 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   nothing. OpenAI dropped the **5h window for Codex Pro** — confirmed permanent 2026-07-16
   (real Codex usage 4h before a poll still returned no 5h window, and codex-cli's OWN rollout
   snapshot agrees: `window_minutes: 10080, secondary: null`, same `resets_at` we read) — so
-  `cx5h` is retired. **Detected, never hardcoded**: `wham/usage` rots too fast for a constant,
+  `cx5h` is retired. **Detected, never hardcoded**: the account's window set changes too often for a constant,
   so the poller's `--buckets` prints the labels with LIVE windows and setup's `ensure_live()`
   skips the rest. If OpenAI restores 5h, a plain `cmux-sentinel-setup.sh` re-run brings the
   meter back with no code change. **`--buckets` FAILS OPEN** — it prints nothing on every

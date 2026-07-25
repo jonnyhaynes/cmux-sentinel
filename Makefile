@@ -44,7 +44,7 @@ markdown:
 # state machines: offline, stub cmux/security/curl, run on Linux CI too.
 #   bridge-state  — agent activity markers (⚡/⏳/❓)
 #   poller-gate   — Claude usage-poller gating + malformed-value clamping + bare-label resolve
-#   codex-poller  — Codex endpoint routing + malformed-duration handling + clamping
+#   codex-poller  — Codex app-server RPC + duration routing + malformed-value handling
 #   amp-poller    — Amp prose parsing + remaining→used inversion + opt-in orb meter
 #   amp-bridge    — Amp lifecycle adapter + shared bridge co-tenancy/error semantics
 #   install-hooks  — integration isolation + hook merge / preserve / idempotent / no-jq

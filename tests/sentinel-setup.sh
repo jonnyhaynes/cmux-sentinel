@@ -112,7 +112,7 @@ ckn "did not create cx5h (codex disabled)" created cx5h
 ck  "exactly 2 created" [ "$(ncreated)" = 2 ]
 
 echo "T2: providers=\"claude codex\" → creates all four"
-# $HOME is a throwaway with no ~/.codex/auth.json, so the real poller can't tell us
+# $HOME/PATH have no logged-in Codex CLI, so the real poller can't tell us
 # which windows exist → setup fails open and creates both codex sentinels.
 reset
 USAGE_PROVIDERS="claude codex" bash "$SETUP" >/dev/null 2>&1

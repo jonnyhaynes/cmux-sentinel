@@ -159,12 +159,13 @@ if have cmux && have jq; then
   done
 else warn "cmux or jq unavailable — can't check sentinels"; fi
 
-# Codex provider — same installed × enabled × sentinel cross-check. The wham/usage
-# endpoint requires a ChatGPT-mode auth.json; API-key mode has no account allowance.
+# Codex provider — same installed × enabled × sentinel cross-check. Ask Codex's
+# auth abstraction so file- and keyring-backed ChatGPT logins both work. API-key
+# mode has no ChatGPT-plan account allowance.
 lblcx5="${SENTINEL_CX5H_LABEL:-cx5h}"; lblcx7="${SENTINEL_CX7D_LABEL:-cx7d}"
 codex_installed() {
-  [ -f "$HOME/.codex/auth.json" ] || return 1
-  jq -e '.auth_mode == "chatgpt" and ((.tokens.access_token // "") != "")' "$HOME/.codex/auth.json" >/dev/null 2>&1
+  have codex || return 1
+  codex login status 2>&1 | grep -q '^Logged in using ChatGPT$'
 }
 case " $providers " in *" codex "*) codex_on=1 ;; *) codex_on=0 ;; esac
 if codex_installed; then codex_inst=1; else codex_inst=0; fi

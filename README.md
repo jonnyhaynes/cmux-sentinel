@@ -272,8 +272,8 @@ Codex ships built-in but is **off by default** (out-of-the-box is Claude-only). 
    ~/Library/LaunchAgents/com.cmux-codex-usage.plist`.
 
 `~/bin/cmux-sentinel-doctor.sh` cross-checks installed × enabled × sentinel-present across every
-cmux window. Codex requires a ChatGPT login in `~/.codex/auth.json`; API-key logins are not covered
-by this account-usage endpoint.
+cmux window. Codex requires a ChatGPT-plan login managed by the Codex CLI (`codex login`); API-key
+logins are not covered by this account allowance.
 
 ### Enable the Amp provider
 
@@ -309,18 +309,18 @@ PRs adding providers are very welcome.
 
 ### Codex provider — data source
 
-Codex uses ChatGPT's `wham/usage` endpoint with the OAuth token and account id from
-`~/.codex/auth.json` (the token is read fresh and never printed). This is the same account-server
-source the Codex CLI polls; the older local rollout-file source no longer updates reliably for
-`codex exec` sessions. Current Codex also exposes a structured `account/rateLimits/read` app-server
-RPC, but adopting it here would add a daemon/protocol lifecycle around the same backend source;
-the dependency-light shell poller therefore keeps the direct request and defensive validation.
-See [`docs/usage-data-source-research.md`](docs/usage-data-source-research.md) for the source audit.
+Codex uses the CLI's structured `account/rateLimits/read` app-server RPC. The poller starts one
+short-lived app server per refresh—no daemon—and speaks its JSONL protocol using Bash + `jq`. Codex
+therefore owns OAuth refresh, file/keyring credential lookup, account headers, backend routing, and
+response normalization; bearer and refresh tokens never enter this script. Under the hood current
+Codex still reads ChatGPT's internal `wham/usage` route. The older local rollout-file source no
+longer updates reliably for `codex exec` sessions. See
+[`docs/usage-data-source-research.md`](docs/usage-data-source-research.md) for the source audit.
 
-The response's `primary_window`/`secondary_window` positions are not stable. The poller routes only
-windows with a numeric `limit_window_seconds`: under one day to `cx5h`, one day or more to `cx7d`.
-Some plans currently have no short window, so setup skips that sentinel on a positive answer.
-Malformed/unknown durations are never guessed as a 5-hour bucket.
+The response's `primary`/`secondary` positions are not stable. The poller routes only windows with
+a numeric `windowDurationMins`: under one day to `cx5h`, one day or more to `cx7d`. Some plans
+currently have no short window, so setup skips that sentinel on a positive answer. Malformed or
+unknown durations are never guessed as a 5-hour bucket.
 
 ### Claude provider — data source
 
@@ -380,7 +380,7 @@ current validation ceiling and upstream implementation evidence are recorded in
 
 ```text
 bin/cmux-claude-usage.sh     Claude usage poller — OAuth usage endpoint (--print | --raw | --update)
-bin/cmux-codex-usage.sh      Codex usage poller — ChatGPT wham/usage endpoint (--print | --raw | --update | --buckets | --status)
+bin/cmux-codex-usage.sh      Codex usage poller — account/rateLimits/read RPC (--print | --raw | --update | --buckets | --status)
 bin/cmux-amp-usage.sh        Amp monthly-allowance poller — `amp usage` parser (--print | --raw | --update | --buckets)
 bin/cmux-sentinel-setup.sh   idempotently create the meter sentinel workspaces (+ auto-naming guard)
 bin/cmux-group-sync.sh       workspace-group name → anchor-title sync (opt-in; --list | --raw | --update)
@@ -390,7 +390,7 @@ hooks/cmux-bridge.sh         shared ref-counted agent-state bridge
 hooks/amp-bridge.ts          Amp plugin adapter → shared bridge
 tests/bridge-state.sh        offline bridge state-machine test (stubs cmux; `make test`)
 tests/poller-gate.sh         offline Claude poller gating + clamping + bare-label + multi-window
-tests/codex-poller.sh        offline Codex endpoint parsing + duration routing + multi-window
+tests/codex-poller.sh        offline Codex RPC/auth gating + duration routing + multi-window
 tests/amp-poller.sh          offline Amp prose parsing + remaining→used inversion + orb opt-in
 tests/amp-bridge.sh          shared bridge behavior + Amp adapter contracts
 tests/install-hooks.sh       offline install.sh hook-registration test
@@ -406,10 +406,11 @@ install.sh                   file placement + next-steps
 
 ## Security
 
-OAuth tokens are read fresh from provider-owned local credential stores and sent only to their
-provider usage endpoints; they are never printed or copied into this repo. Amp's `--raw` mode can
-include the signed-in email and is explicitly local-only. Sentinels store no ids or secrets: they
-are resolved from title labels every run.
+OAuth tokens stay in provider-owned credential stores and are sent only by provider-owned clients
+or the Claude poller to their provider endpoints; they are never printed or copied into this repo.
+The Codex poller delegates auth entirely to Codex's app server. Amp's `--raw` mode can include the
+signed-in email and is explicitly local-only. Sentinels store no ids or secrets: they are resolved
+from title labels every run.
 
 ## Contributing
 
