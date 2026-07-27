@@ -19,6 +19,9 @@ API, this tells you what bites. Everything below is verified through **cmux 0.64
   `cmux sidebar open <name>` is the strongest live smoke path; `select`/`reload` exercise the same
   mounted renderer. Visual inspection remains necessary. In remote-renderer mode,
   `CMUX_RENDER_WORKER_DEBUG=1` adds worker/layout telemetry but not source-level interpreter errors.
+- This repo wraps that ceiling honestly as `make sidebar-live`: stage the repo file, validate it,
+  mount it against live data, wait for inspection, close it, and remove the temporary copy. Upstream
+  issue [#9002](https://github.com/manaflow-ai/cmux/issues/9002) tracks a real mounted artifact.
 - The upstream implementation audit and rationale for keeping visual inspection instead of a brittle
   screenshot/OCR CI gate are in [`sidebar-render-validation.md`](sidebar-render-validation.md).
 
@@ -33,18 +36,24 @@ API, this tells you what bites. Everything below is verified through **cmux 0.64
   title prefixes for sentinel identity and a Unicode fallback for bootstrap/offline windows.
 - **`cmux set-status` does NOT reach custom sidebars.** It renders native-sidebar pills only; the
   binding contract has no status field. Agent-state bridges therefore still need static title
-  markers (or another interpreter-visible field).
+  markers (or another interpreter-visible field). Upstream issue
+  [#9001](https://github.com/manaflow-ai/cmux/issues/9001) tracks this projection drift together with
+  the snapshot's missing `progress`.
 - **`cmux sidebar-state` and `extension.sidebar.snapshot` are data snapshots, not render probes.**
   The snapshot can omit `progress` immediately after a successful `set-progress`. Verify disputed
   fields with an in-sidebar `Text(...)` against a workspace where the field is known-set.
 
-## Identity: no stable workspace id
+## Identity: title anchors remain the compatible contract
 
-- **cmux 0.64.15 removed stable workspace UUIDs.** `cmux workspace list --json` returns
+- **Installed cmux 0.64.20 still has no usable stable workspace UUID.** `cmux workspace list --json` returns
   `id: null`; the only handle is a positional `ref` (`workspace:N`) that **rotates
   across app restarts and reorders**. Don't store a workspace id to match a row later —
   it goes stale on the next restart. Match by a stable signal you control, e.g. a
   **title prefix** (`w.title.hasPrefix("5h ")`), re-resolved every run.
+- **Upstream `main` is improving this, but do not migrate yet.** PR #8695 normally preserves the
+  runtime `Workspace.id` through session restore. It can still be reminted on collision/exclusion,
+  and cmux's explicitly durable `Workspace.stableId` is not exposed by workspace JSON, the snapshot
+  RPC, or `w.id`. Keep title anchors until a released build exposes a durable public contract.
 
 ## Language subset
 

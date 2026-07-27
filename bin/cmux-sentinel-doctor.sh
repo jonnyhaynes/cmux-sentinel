@@ -102,14 +102,18 @@ else warn "no ~/.config/cmux/cmux.json — can't confirm automation mode"; fi
 # (USAGE_PROVIDERS), and the sidebar hides any provider with no sentinels. So this
 # section cross-checks installed × enabled × sentinel-present and flags only the
 # states that are actually wrong (e.g. a leftover panel for an uninstalled
-# provider). Sentinels are resolved by TITLE LABEL (cmux 0.64.15 dropped stable
-# UUIDs — see the poller's resolve_ref); labels + provider set are env-overridable.
+# provider). Sentinels are resolved by TITLE LABEL (released cmux 0.64.20 exposes
+# no durable public workspace handle — see the poller's resolve_ref); labels +
+# provider set are env-overridable.
 echo "• usage meters (providers)"
 envf="$CFG/usage-sentinels.env"
 # shellcheck disable=SC1090
 [ -f "$envf" ] && . "$envf"
 lbl5="${SENTINEL_5H_LABEL:-5h}"; lbl7="${SENTINEL_7D_LABEL:-7d}"
 providers="${USAGE_PROVIDERS:-claude}"
+usage_state_dir="${CMUX_SENTINEL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/cmux-sentinel}/usage"
+stale_after="${USAGE_STALE_AFTER_SECONDS:-900}"
+case "$stale_after" in ''|*[!0-9]*) warn "invalid USAGE_STALE_AFTER_SECONDS='$stale_after' — using 900"; stale_after=900 ;; esac
 
 # Match the pollers/setup: workspace lists are window-scoped, while launchd and
 # the doctor may have no default-window context. Return "ref<TAB>window" and keep
@@ -135,6 +139,41 @@ close_hint() { # $1 = ref  $2 = window (empty for the caller/default window)
   fi
 }
 
+age_label() { # $1=seconds
+  local age="${1:-0}" d h m
+  [ "$age" -ge 0 ] 2>/dev/null || age=0
+  d=$((age / 86400)); h=$(((age % 86400) / 3600)); m=$(((age % 3600) / 60))
+  if [ "$d" -gt 0 ]; then printf '%dd %dh' "$d" "$h"
+  elif [ "$h" -gt 0 ]; then printf '%dh %dm' "$h" "$m"
+  elif [ "$m" -gt 0 ]; then printf '%dm' "$m"
+  else printf '%ds' "$age"; fi
+}
+
+# Poller loaded != poller succeeding. Each provider atomically records the epoch
+# after its complete --update; this catches a launchd job that silently stopped or
+# has failed for multiple intervals. Advisory only: stale data does not break wiring.
+check_usage_freshness() { # $1=provider  $2=poller filename
+  local provider="$1" script="$2" stamp="$usage_state_dir/$1.last-success" now saved age
+  [ "$stale_after" -gt 0 ] || return 0
+  if [ ! -f "$stamp" ]; then
+    warn "$provider data freshness unknown — no successful update recorded; run: ~/bin/$script --update"
+    return
+  fi
+  IFS= read -r saved < "$stamp" || saved=""
+  case "$saved" in ''|*[!0-9]*) warn "$provider freshness stamp is invalid — run: ~/bin/$script --update"; return ;; esac
+  now=$(date +%s)
+  case "$now" in ''|*[!0-9]*) warn "couldn't read the clock — skipping $provider freshness"; return ;; esac
+  age=$((now - saved))
+  if [ "$age" -lt -60 ]; then
+    warn "$provider freshness stamp is in the future — check the system clock, then run: ~/bin/$script --update"
+  elif [ "$age" -gt "$stale_after" ]; then
+    warn "$provider data stale (last successful update $(age_label "$age") ago; expected within $(age_label "$stale_after")) — run: ~/bin/$script --update"
+  else
+    [ "$age" -lt 0 ] && age=0
+    ok "$provider data fresh (updated $(age_label "$age") ago)"
+  fi
+}
+
 claude_installed() {
   security find-generic-password -s "Claude Code-credentials" -w &>/dev/null && return 0
   [ -f "$HOME/.claude/.credentials.json" ] && return 0
@@ -146,6 +185,7 @@ if claude_installed; then claude_inst=1; else claude_inst=0; fi
 if [ "$claude_on" = 1 ] && [ "$claude_inst" = 1 ]; then
   ok "claude: installed + enabled → meters active"
   check_launchd_job "claude" "com.cmux-claude-usage"
+  check_usage_freshness "claude" "cmux-claude-usage.sh"
 elif [ "$claude_on" = 1 ]; then
   warn "claude: enabled but NOT installed here — poller exits cleanly; any existing sentinels remain until closed"
 else
@@ -181,6 +221,7 @@ if codex_installed; then codex_inst=1; else codex_inst=0; fi
 if [ "$codex_on" = 1 ] && [ "$codex_inst" = 1 ]; then
   ok "codex: ChatGPT login stored + provider enabled"
   check_launchd_job "codex" "com.cmux-codex-usage"
+  check_usage_freshness "codex" "cmux-codex-usage.sh"
 elif [ "$codex_on" = 1 ]; then
   warn "codex: enabled but NOT installed here — poller exits cleanly; any existing sentinels remain until closed"
 elif [ "$codex_inst" = 1 ]; then
@@ -271,6 +312,7 @@ if amp_installed; then amp_inst=1; else amp_inst=0; fi
 if [ "$amp_on" = 1 ] && [ "$amp_inst" = 1 ]; then
   ok "amp: installed + enabled → meters active"
   check_launchd_job "amp" "com.cmux-amp-usage"
+  check_usage_freshness "amp" "cmux-amp-usage.sh"
 elif [ "$amp_on" = 1 ]; then
   warn "amp: enabled but NOT installed/logged in here — poller exits cleanly; any existing sentinels remain until closed"
 elif [ "$amp_inst" = 1 ]; then

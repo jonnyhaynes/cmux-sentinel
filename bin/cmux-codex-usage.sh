@@ -63,6 +63,7 @@ LABEL_CX7D="${SENTINEL_CX7D_LABEL:-cx7d}"
 
 PROVIDER_ID="codex"
 USAGE_PROVIDERS="${USAGE_PROVIDERS:-claude}"
+USAGE_STATE_DIR="${CMUX_SENTINEL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/cmux-sentinel}/usage"
 
 # App-server RPC process state. One short-lived process per poll keeps this Bash 3.2
 # compatible without adding a daemon, Python, or another runtime dependency.
@@ -73,6 +74,16 @@ case "$RPC_INIT_INTERVALS" in ''|*[!0-9]*) RPC_INIT_INTERVALS=50 ;; esac
 case "$RPC_READ_INTERVALS" in ''|*[!0-9]*) RPC_READ_INTERVALS=300 ;; esac
 
 die() { echo "ERR: $*" >&2; exit 1; }
+
+# Record only a COMPLETE successful --update. Keep this best-effort: freshness
+# diagnostics must never turn an already-painted meter into a failed launchd run.
+record_success() {
+  local tmp
+  mkdir -p "$USAGE_STATE_DIR" || return 1
+  tmp=$(mktemp "$USAGE_STATE_DIR/.${PROVIDER_ID}.XXXXXX") || return 1
+  printf '%s\n' "$(date +%s)" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$USAGE_STATE_DIR/$PROVIDER_ID.last-success" || { rm -f "$tmp"; return 1; }
+}
 
 status_json() { # $1=status $2=reason $3=has-5h $4=has-7d $5=additional JSON $6=reset summary/null
   jq -cn --arg status "$1" --arg reason "$2" \
@@ -593,6 +604,7 @@ main() {
     local sum5 sum7
     if [ "$na5" = 1 ]; then sum5="n/a"; else sum5="${pct5}% (${h5})"; fi
     if [ "$na7" = 1 ]; then sum7="n/a"; else sum7="${pct7}% (${h7})"; fi
+    record_success || echo "WARN: meters updated, but couldn't record Codex freshness in $USAGE_STATE_DIR" >&2
     echo "updated: ${LABEL_CX5H}=${sum5}  ${LABEL_CX7D}=${sum7}"
     return
   fi

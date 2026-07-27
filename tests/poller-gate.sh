@@ -79,6 +79,7 @@ PATH="$ROOT/bin:$PATH"
 CREDS="$ROOT/home/.claude/.credentials.json"
 RENAMES="$ROOT/.renames"
 PROGRESS="$ROOT/.progress"
+STAMP="$ROOT/home/.local/state/cmux-sentinel/usage/claude.last-success"
 TOKEN_JSON='{"claudeAiOauth":{"accessToken":"faketoken"}}'
 
 pass=0; fail=0
@@ -94,12 +95,17 @@ ckprog() { if grep -q -- "$2" "$PROGRESS" 2>/dev/null; then pass=$((pass + 1)); 
            else fail=$((fail + 1)); printf '  ✗ %s — [%s] not in progress log:\n%s\n' "$1" "$2" "$(cat "$PROGRESS" 2>/dev/null)"; fi; }
 ckprognothas() { if grep -q -- "$2" "$PROGRESS" 2>/dev/null; then fail=$((fail + 1)); printf '  ✗ %s — unexpected [%s] in progress log:\n%s\n' "$1" "$2" "$(cat "$PROGRESS" 2>/dev/null)"
                 else pass=$((pass + 1)); printf '  ✓ %s\n' "$1"; fi; }
-reset()  { rm -f "$RENAMES" "$PROGRESS"; }
+ckstamp() { if [ -s "$STAMP" ] && grep -Eq '^[0-9]+$' "$STAMP"; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
+            else fail=$((fail + 1)); printf '  ✗ %s — no valid success stamp\n' "$1"; fi; }
+cknostamp() { if [ ! -e "$STAMP" ]; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
+              else fail=$((fail + 1)); printf '  ✗ %s — unexpected success stamp\n' "$1"; fi; }
+reset()  { rm -f "$RENAMES" "$PROGRESS" "$STAMP"; }
 
 echo "T1: disabled (USAGE_PROVIDERS without claude) → exit 0, writes nothing"
 reset; printf '%s' "$TOKEN_JSON" > "$CREDS"          # installed, but explicitly disabled
 USAGE_PROVIDERS="codex" bash "$POLLER" --update; ckcode "disabled --update" "$?" 0
 ckno "disabled is a no-op"
+cknostamp "disabled update records no freshness"
 
 echo "T2: not installed (no creds, no Keychain) → exit 0, writes nothing"
 reset; rm -f "$CREDS"
@@ -111,6 +117,7 @@ reset; printf '%s' "$TOKEN_JSON" > "$CREDS"
 STUB_CURL="fail" bash "$POLLER" --update; ckcode "installed+offline --update" "$?" 1
 ckhas "offline stamps ⚠" "⚠"
 ckprog "offline clears the native bar so the ⚠ title shows through" "CLEAR"
+cknostamp "offline paint is not a successful refresh"
 
 echo "T4: installed + reachable → exit 0, bars + native progress written"
 reset
@@ -123,6 +130,12 @@ ckprog "7d native progress value (42% → 0.42)" "PROG 0.42"
 ckprog "native labels use compact parenthesized countdowns" "% ("
 ckprognothas "native labels omit redundant resets wording" "resets"
 ckhas "fallback title separates detail from the second-row bar" "|"
+ckstamp "complete update records freshness"
+
+echo "T4b: read-only modes never record freshness"
+reset
+STUB_CURL="ok" bash "$POLLER" --print >/dev/null
+cknostamp "--print records no freshness"
 
 echo "T5: malformed utilization (over-100 / negative) → clamped, exit 0, no crash"
 reset
