@@ -134,6 +134,9 @@ logged in). Common fixes:
 - **missing expected sentinel** → redo Step 2; a positively absent Codex window is intentionally
   skipped, while an unknown/offline capability retains the current layout.
 - **socketControlMode** warning → redo Step 3.
+- **data freshness unknown/stale** → run the provider's printed `~/bin/cmux-*-usage.sh --update`
+  command. A successful update creates/refreshes its local state stamp; if it fails, fix the
+  accompanying provider/socket diagnostic rather than suppressing the warning.
 
 Report the final doctor output to the user.
 

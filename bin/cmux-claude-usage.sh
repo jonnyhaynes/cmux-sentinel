@@ -67,8 +67,20 @@ LABEL_7D="${SENTINEL_7D_LABEL:-7d}"
 # launchd (e.g. USAGE_PROVIDERS="codex").
 PROVIDER_ID="claude"
 USAGE_PROVIDERS="${USAGE_PROVIDERS:-claude}"
+USAGE_STATE_DIR="${CMUX_SENTINEL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/cmux-sentinel}/usage"
 
 die() { echo "ERR: $*" >&2; exit 1; }
+
+# Record only a COMPLETE successful --update. The doctor reads the epoch payload
+# instead of filesystem mtimes, which keeps the check portable and easy to stub.
+# Failure here must not turn an already-painted meter into a failed poll.
+record_success() {
+  local tmp
+  mkdir -p "$USAGE_STATE_DIR" || return 1
+  tmp=$(mktemp "$USAGE_STATE_DIR/.${PROVIDER_ID}.XXXXXX") || return 1
+  printf '%s\n' "$(date +%s)" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$USAGE_STATE_DIR/$PROVIDER_ID.last-success" || { rm -f "$tmp"; return 1; }
+}
 
 # Is THIS provider enabled in the configured set? (space-padded substring match)
 provider_enabled() {
@@ -362,6 +374,7 @@ main() {
     err=$(_meter_write "$LABEL_7D" "$LABEL_7D |${sd_lbl}|${sd_bar}" "$sd_frac" "$sd_lbl"); rc=$?
     [ "$rc" = 10 ] && die "no '$LABEL_7D' sentinel workspace (title \"$LABEL_7D\" or starting \"$LABEL_7D \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
     [ "$rc" = 11 ] && die "rename rejected for $LABEL_7D sentinel: ${err:-no detail}"
+    record_success || echo "WARN: meters updated, but couldn't record Claude freshness in $USAGE_STATE_DIR" >&2
     echo "updated: ${LABEL_5H}=${fh_pct}% (${fh_human})  ${LABEL_7D}=${sd_pct}% (${sd_human})"
     return
   fi

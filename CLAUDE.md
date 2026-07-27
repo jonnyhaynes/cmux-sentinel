@@ -10,7 +10,9 @@ discover from the code alone, because the failure mode is a **silently blank sid
 `cmux sidebar validate` parses and interprets against a FIXED SYNTHETIC context, but does not mount
 `RenderNodeView`, run SwiftUI/AppKit layout, or exercise every live-data branch. It can pass files
 that render **completely blank** at runtime. cmux exposes no public rendered-tree/pixel assertion;
-`sidebar open/select/reload` plus an eyeball is the practical ceiling. See
+`sidebar open/select/reload` plus an eyeball is the practical ceiling. `make sidebar-live` stages
+the repo file under a temporary name, mounts it against live data, waits for inspection, then closes
+and cleans it up; it deliberately does not claim a pixel pass. See
 `docs/sidebar-render-validation.md` for the upstream source audit. Confirmed traps:
 
 - **String ops `.hasPrefix` / `.contains` / `.hasSuffix` / `.split` DO work** on the current build
@@ -60,7 +62,8 @@ that render **completely blank** at runtime. cmux exposes no public rendered-tre
   `description`, `color`, `branch`+`dirty`, `pr`+`prs`, `progress`, `latestMessage`, `latestPrompt`,
   `latestAt`, `remote`. **Consequence: a cmux-native agent integration can never light up this
   sidebar — per-agent title-marker bridges stay mandatory.** (`latestMessage`/`latestPrompt`/
-  `latestAt` are bindable and currently unused here.)
+  `latestAt` are bindable and currently unused here.) Upstream issue
+  `manaflow-ai/cmux#9001` tracks unifying this projection with the snapshot's missing `progress`.
 - **Sentinel resolution is multi-window + title-anchored.** `cmux workspace list` is window-scoped and
   launchd has no window context, so the pollers' `resolve_ref` tries the default window then scans
   `list-windows`, returning `ref⇥window` and renaming with `--window` (unambiguous positional ref).
@@ -69,7 +72,7 @@ that render **completely blank** at runtime. cmux exposes no public rendered-tre
   clobber a title prefix.
 - **`cmux sidebar-state` DIVERGES from what the sidebar sees** (it reads the canonical store). Never
   use it to predict the sidebar — verify with an in-sidebar `Text(...)` probe.
-- **cmux 0.64.15 REMOVED stable workspace UUIDs.** `cmux workspace list --json` now returns
+- **Installed cmux 0.64.20 has no usable stable workspace UUID.** `cmux workspace list --json` returns
   `id: null`; the only handle is a positional `ref` (`workspace:N`) that **rotates across app
   restarts and reorders**. The old scheme stored sentinel UUIDs in the env file and the sidebar —
   that broke on the first restart (silent "offline" meters in the normal list). Both sides now anchor
@@ -79,7 +82,11 @@ that render **completely blank** at runtime. cmux exposes no public rendered-tre
   the same reason the bridge
   reads a LIVE `$CMUX_WORKSPACE_ID` (still a UUID, set per-shell) instead of storing one. Don't
   reintroduce a stored id. The committed and deployed sidebars are now byte-identical (no id
-  substitution at install).
+  substitution at install). **Upstream `main` changed after this release:** PR #8695 now normally
+  preserves runtime `Workspace.id` through session restore, but it can still be reminted on
+  collision/exclusion and the explicitly durable `Workspace.stableId` is not exposed by workspace
+  JSON, the snapshot RPC, or `w.id`. Keep the title anchor until a released durable public contract
+  is re-probed. See `.claude/research/2026-07-27-cmux-upstream-sidebar-gaps.md`.
 - **Meters use a native value bar now.** `ProgressView(value:)` needs a numeric `progress`; the
   poller supplies it via `set-progress` (see the progress bullet above), so a meter row renders a
   native `ProgressView` tinted from the value (red ≥90%, amber ≥70%, else blue) with
@@ -159,11 +166,12 @@ cmux sidebar validate workspaces && cmux sidebar reload   # synthetic interpreta
 ./bin/cmux-sentinel-setup.sh           # create known-live provider sentinels; fail open when unknown + park them out of ⌘1…⌘9
 ./bin/cmux-group-sync.sh --list        # workspace-GROUP names: which anchors are out of sync (read-only)
 ./bin/cmux-group-sync.sh --update      # rename group anchors to the group name (needs GROUP_NAME_SYNC=1)
+make sidebar-live                     # mount repo sidebar against live data; human visual verdict
 
 # offline tests (stub cmux/security/curl/$HOME — run in CI too)
-make test   # bridge-state(36) poller-gate(34) codex-poller(76) install-hooks(43) sentinel-setup(50)
-            # sentinel-doctor(28) group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(23)
-            # amp-bridge(43) amp-poller(45) = 440 assertions total
+make test   # bridge-state(36) poller-gate(38) codex-poller(83) install-hooks(43) sentinel-setup(50)
+            # sentinel-doctor(31) group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(23)
+            # amp-bridge(43) amp-poller(49) = 458 assertions total
 ```
 
 ## Architecture / where things live
@@ -174,7 +182,8 @@ bin/cmux-claude-usage.sh    Claude usage poller. make_bar / sev_dot / mark_offli
 bin/cmux-codex-usage.sh     Codex usage poller (short-lived account/rateLimits/read app-server RPC; Codex owns auth/refresh). Default meter + read-only named limits/reset credits; sanitized --raw / local-only --raw-full; actionable RPC failure classes; --buckets drives setup.
 bin/cmux-amp-usage.sh       Amp usage poller (scrapes `amp usage` PROSE — no --json). Monthly allowance, not windows. REMAINING→USED inversion. ampu (agent) + ampo (orb, opt-in AMP_ORB_METER=1).
 bin/cmux-sentinel-setup.sh  idempotent sentinel creation (per USAGE_PROVIDERS; known-live buckets only, fail-open on unknown) + auto-naming guard probe + ⌘N shortcut layout (layout/sentinel_window, --no-layout).
-bin/cmux-sentinel-doctor.sh READ-ONLY wiring report: cmux/sidebar/bridge/auto-refresh, installed × enabled × live capability × sentinel per provider, informational Codex limits/reset credits, ⌘N layout drift, snapshot data.
+bin/cmux-sentinel-doctor.sh READ-ONLY wiring report: cmux/sidebar/bridge/auto-refresh, installed × enabled × live capability × sentinel × freshness per provider, informational Codex limits/reset credits, ⌘N layout drift, snapshot data.
+bin/cmux-sidebar-live-smoke.sh  stage + validate + mount the repo sidebar against live data, wait for a human verdict, then close/clean up; not a pixel assertion.
 bin/cmux-group-sync.sh      workspace-GROUP name → anchor-title sync (opt-in GROUP_NAME_SYNC). split-marker / multi-window / --list|--raw|--update.
 hooks/cmux-bridge.sh        Claude Code → cmux agent-state bridge (⚡ working / ⏳ compacting / ❓ waiting-on-you rows). AGENT-AGNOSTIC: CMUX_SENTINEL_SESSION_PID / _AGENT_LABEL / _LOG_SOURCE let any agent's adapter reuse it.
 hooks/amp-bridge.ts         Amp plugin (Bun/TS) → drives cmux-bridge.sh. Thin ADAPTER, no own state, so amp+claude co-tenants ref-count in one $WORKROOT. 2-of-3 states (no ⏳; ❓ opt-in).
@@ -240,7 +249,8 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   normalization; **no OAuth material enters the poller**. Under the hood current Codex still reads
   ChatGPT's internal `wham/usage` route. The JSONL client keeps a FIFO open until the correlated
   `id=1` response arrives because early stdin EOF races app-server shutdown; notifications may
-  interleave. **Route windows by `windowDurationMins`, NEVER by primary/secondary POSITION**
+  interleave or be torn mid-write; the JSONL reader ignores malformed unrelated lines and
+  correlates only complete responses by id. **Route windows by `windowDurationMins`, NEVER by primary/secondary POSITION**
   (<1d → `cx5h`, ≥1d → `cx7d`) — OpenAI reshaped that twice in ~10 days. The OLD local-rollout source
   (`~/.codex/sessions/**/rollout-*.jsonl`) is DEAD on codex-cli 0.142.x — `codex exec` (how Claude
   Code drives Codex) doesn't write `rate_limits` (openai/codex#14880) and fresh data moved to
@@ -318,6 +328,10 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   current build `reload-config` applies this **live** (proven: an external launchd kick landed its
   renames with no restart) — the earlier "needs a full cmux restart" note was outdated. If external
   (launchd) socket commands start getting rejected, the automation mode regressed → restart cmux.
+  Every complete provider `--update` atomically records an epoch under
+  `~/.local/state/cmux-sentinel/usage/`; doctor warns when an enabled provider has no success stamp
+  or the last one is older than `USAGE_STALE_AFTER_SECONDS` (default 900, zero disables). Offline/
+  partial/read-only runs never advance the stamp, so "launchd loaded" cannot mask a stuck poller.
 - **launchd does not reread a changed loaded plist.** `install.sh` compares generated plist content,
   leaves unchanged jobs alone, and by default prints exact `bootout` + `bootstrap` commands for a
   changed+loaded job. `--reload-agents` / `RELOAD_AGENTS=1` explicitly performs only those targeted

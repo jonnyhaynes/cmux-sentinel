@@ -94,6 +94,7 @@ while IFS= read -r line; do
     1)
       # Prove the poller correlates by id rather than treating the next line as the response.
       printf '{"method":"remoteControl/status/changed","params":{"status":"disabled"}}\n'
+      [ -z "${STUB_TORN_NOTIFICATION:-}" ] || printf '{"method":"server/partial"\n'
       if [ "${STUB_RPC:-fail}" = "expired" ]; then
         printf '{"id":1,"error":{"code":-32603,"message":"GET usage failed: 401 Unauthorized: token_expired"}}\n'
       elif [ "${STUB_RPC:-fail}" = "network" ]; then
@@ -131,6 +132,7 @@ export CODEXTEST="$ROOT" HOME="$ROOT/home" TMPDIR="$ROOT"
 PATH="$ROOT/bin:/usr/bin:/bin"
 RENAMES="$ROOT/.renames"
 PROGRESS="$ROOT/.progress"
+STAMP="$ROOT/home/.local/state/cmux-sentinel/usage/codex.last-success"
 
 auth_chatgpt() { export STUB_AUTH=chatgpt; }
 auth_apikey()  { export STUB_AUTH=apikey; }
@@ -151,12 +153,17 @@ ckout()  { if [ "$2" = "$3" ]; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
            else fail=$((fail + 1)); printf '  ✗ %s — stdout got [%s] want [%s]\n' "$1" "$2" "$3"; fi; }
 ckjq()   { if printf '%s' "$2" | jq -e "$3" >/dev/null 2>&1; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
            else fail=$((fail + 1)); printf '  ✗ %s — jq [%s] failed for:\n%s\n' "$1" "$3" "$2"; fi; }
-reset()  { rm -f "$RENAMES" "$PROGRESS"; }
+ckstamp() { if [ -s "$STAMP" ] && grep -Eq '^[0-9]+$' "$STAMP"; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
+            else fail=$((fail + 1)); printf '  ✗ %s — no valid success stamp\n' "$1"; fi; }
+cknostamp() { if [ ! -e "$STAMP" ]; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
+              else fail=$((fail + 1)); printf '  ✗ %s — unexpected success stamp\n' "$1"; fi; }
+reset()  { rm -f "$RENAMES" "$PROGRESS" "$STAMP"; }
 
 echo "T1: disabled (USAGE_PROVIDERS without codex) → exit 0, writes nothing"
 reset; auth_chatgpt
 STUB_RPC=ok USAGE_PROVIDERS="claude" bash "$POLLER" --update; ckcode "disabled --update" "$?" 0
 ckno "disabled is a no-op"
+cknostamp "disabled update records no freshness"
 out=$(STUB_RPC=ok USAGE_PROVIDERS="claude" bash "$POLLER" --status 2>/dev/null)
 ckjq "disabled --status is machine-readable" "$out" '.status == "disabled" and .buckets == []'
 
@@ -177,6 +184,7 @@ reset; auth_chatgpt
 STUB_RPC=fail USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "offline --update" "$?" 1
 ckhas "stamps ⚠" "⚠"
 ckprog "offline clears the native bar so the ⚠ title shows through" "CLEAR"
+cknostamp "offline paint is not a successful refresh"
 out=$(STUB_RPC=fail USAGE_PROVIDERS="claude codex" bash "$POLLER" --status 2>/dev/null)
 ckjq "offline --status is unknown, not no-windows" "$out" '.status == "unknown" and .reason == "Codex rate-limit RPC failed"'
 
@@ -211,6 +219,19 @@ ckprog "cx7d native progress value (12% → 0.12)" "PROG 0.12"
 ckprog "native label uses compact parenthesized countdown" "33% ("
 ckprognothas "native label does not repeat resets" "resets"
 ckhas "fallback title separates detail from its second-row bar" "|"
+ckstamp "complete update records freshness"
+
+echo "T4b: torn JSONL notification is skipped before the correlated response"
+reset; auth_chatgpt
+STUB_RPC=ok STUB_TORN_NOTIFICATION=1 STUB_P5=31 STUB_P7=11 \
+  USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "torn-notification --update" "$?" 0
+ckhas "torn notification does not hide cx5h" "cx5h.*31%"
+ckhas "torn notification does not hide cx7d" "cx7d.*11%"
+
+echo "T4c: read-only modes never record freshness"
+reset; auth_chatgpt
+STUB_RPC=ok USAGE_PROVIDERS="claude codex" bash "$POLLER" --print >/dev/null
+cknostamp "--print records no freshness"
 
 echo "T5: response missing rate-limit windows (schema changed) → exit 1, ⚠ stamped"
 reset; auth_chatgpt

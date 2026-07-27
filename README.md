@@ -152,7 +152,9 @@ remaining manual steps. In short:
    a changed loaded plist: the installer prints exact `bootout` + `bootstrap` commands, or
    `./install.sh --reload-agents` safely reloads only jobs that are both changed and loaded.
 6. **Verify the pipeline:** `make doctor` (or `~/bin/cmux-sentinel-doctor.sh`) — a read-only check
-   that the bridge, hooks, launchd job, automation mode, and sentinels are all wired.
+   that the bridge, hooks, launchd job, automation mode, sentinels, and recent successful provider
+   updates are all present. Each complete `--update` records a local epoch stamp; doctor warns after
+   15 minutes without success, so a loaded-but-stuck launchd job cannot leave a plausible stale bar.
 
 ### Working-state rows (the hooks bridge)
 
@@ -339,6 +341,8 @@ also informational only—the tool reports availability/status and leaves redemp
 
 For debugging, `--raw` prints normalized JSON with account-scoped reset-credit ids removed.
 `--raw-full` deliberately preserves the complete response, warns first, and must stay local.
+The offline schema corpus covers two-window, weekly-only, short-only, reordered, named-limit,
+reset-credit, malformed-field, and torn/interleaved JSONL shapes.
 
 ### Claude provider — data source
 

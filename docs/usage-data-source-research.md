@@ -38,9 +38,10 @@ was logged in. A normal model request exposed the actionable cause—its refresh
 been used and re-login was required. The RPC cannot repair an invalidated refresh token, but it can
 perform normal refreshes and surfaces the same honest offline state without duplicating auth logic.
 
-Fixtures cover the JSONL handshake, interleaved notifications, auth/network/timeout/crash failures,
-classic, swapped, weekly-only, short-only, malformed duration/percentage, sanitized raw output, and
-expanded responses carrying unrelated credits/spend/additional limits/reset credits.
+Fixtures cover the JSONL handshake, valid and deliberately torn interleaved notifications,
+auth/network/timeout/crash failures, classic, swapped, weekly-only, short-only, malformed
+duration/percentage, sanitized raw output, and expanded responses carrying unrelated
+credits/spend/additional limits/reset credits.
 
 Authoritative source references in <https://github.com/openai/codex>:
 

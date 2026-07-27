@@ -1,6 +1,6 @@
 # cmux Custom-Sidebar Render Validation
 
-**Audited:** 2026-07-24 against cmux 0.64.20 and upstream source.
+**Audited:** 2026-07-27 against cmux 0.64.20 and upstream `main`.
 
 ## Question
 
@@ -26,13 +26,18 @@ Can cmux deterministically validate a custom sidebar end to end, beyond source i
 ## Practical ceiling
 
 1. Run `cmux sidebar validate <name>` for synthetic interpretation.
-2. Run `cmux sidebar open <name>`, or select/reload the mounted sidebar, for the real live-data path.
+2. Run `make sidebar-live` to stage the repo file under a temporary name and open the real live-data
+   path. The helper closes the surface and removes the staged file after inspection.
 3. Inspect the result visually. For a blank panel, replace the body with `Text("HELLO")`, verify it,
    then restore helpers and views incrementally.
 
 Do not add a brittle screenshot/OCR gate: cmux currently exposes no stable isolated-pixel capture,
 render-tree, or accessibility-tree contract. Screenshots remain useful for human review, not as a
 deterministic CI assertion.
+
+Upstream issue [manaflow-ai/cmux#9002](https://github.com/manaflow-ai/cmux/issues/9002) requests a
+supported mounted-render artifact. Until that exists, `make sidebar-live` reports command/mount
+success and explicitly leaves the visual verdict to the human; it never claims a pixel pass.
 
 ## Upstream references
 

@@ -72,8 +72,19 @@ LABEL_AMPO="${SENTINEL_AMPO_LABEL:-ampo}"
 PROVIDER_ID="amp"
 USAGE_PROVIDERS="${USAGE_PROVIDERS:-claude}"
 ORB_METER="${AMP_ORB_METER:-0}"
+USAGE_STATE_DIR="${CMUX_SENTINEL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/cmux-sentinel}/usage"
 
 die() { echo "ERR: $*" >&2; exit 1; }
+
+# Record only a COMPLETE successful --update. Keep this best-effort: freshness
+# diagnostics must never turn an already-painted meter into a failed launchd run.
+record_success() {
+  local tmp
+  mkdir -p "$USAGE_STATE_DIR" || return 1
+  tmp=$(mktemp "$USAGE_STATE_DIR/.${PROVIDER_ID}.XXXXXX") || return 1
+  printf '%s\n' "$(date +%s)" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$USAGE_STATE_DIR/$PROVIDER_ID.last-success" || { rm -f "$tmp"; return 1; }
+}
 
 provider_enabled() {
   case " $USAGE_PROVIDERS " in *" $PROVIDER_ID "*) return 0 ;; *) return 1 ;; esac
@@ -323,6 +334,7 @@ main() {
     cmux ping &>/dev/null || die "cmux socket rejected (restart cmux to apply socketControlMode=automation)"
     _update_bucket "$LABEL_AMPU" "$naU" "${usedU:-0}" "$human"
     [ "$ORB_METER" = "1" ] && _update_bucket "$LABEL_AMPO" "$naO" "${usedO:-0}" "$human"
+    record_success || echo "WARN: meters updated, but couldn't record Amp freshness in $USAGE_STATE_DIR" >&2
     return 0
   fi
 

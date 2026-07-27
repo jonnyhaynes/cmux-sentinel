@@ -9,12 +9,15 @@ Thanks for improving this! It's small and hackable — PRs and issues welcome.
   ```bash
   cp sidebars/workspaces.swift ~/.config/cmux/sidebars/workspaces.swift
   cmux sidebar validate workspaces && cmux sidebar reload workspaces
+  make sidebar-live
   ```
 
   ⚠ `validate` parses and interprets against **synthetic data**, but it does not mount the SwiftUI
   view, exercise every live-data branch, or prove visible pixels. After a meaningful UI change,
-  inspect the mounted sidebar (or run `cmux sidebar open workspaces` for an isolated live mount).
-  cmux exposes no rendered-tree/pixel assertion today. If the sidebar goes blank, bisect by
+  inspect the mounted sidebar. `make sidebar-live` stages the **repo** file under a temporary name,
+  mounts it against live data, waits for inspection, then closes it and cleans up. It honestly proves
+  only that the command/mount path succeeded: cmux exposes no rendered-tree/pixel assertion today.
+  If the sidebar goes blank, bisect by
   replacing the whole body with `Text("hi")`, confirming it renders, then restoring helpers/views
   one at a time.
 
@@ -49,6 +52,7 @@ adds the local cmux sidebar validation:
 
 ```bash
 make check   # shellcheck + secret guard + markdownlint + offline tests + sidebar parse
+make sidebar-live # optional macOS live mount; requires a human visual verdict
 make fmt     # reformat shell with shfmt (opt-in — the scripts use a terse one-liner style)
 ```
 

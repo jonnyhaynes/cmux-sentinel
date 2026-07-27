@@ -179,5 +179,21 @@ case "$out3" in *"codex usage resets: 1 available (read-only; redeem in Codex)"*
 case "$out3" in *"codex_test_model"*|*"codex_opaque"*|*"RateLimitResetCredit_fake_private"*) bad "opaque Codex ids leaked into doctor output";;
   *) ok "doctor never prints opaque limit or reset-credit ids";; esac
 
+echo "T8: provider freshness distinguishes fresh, stale, and never-recorded data"
+state="$HOME/.local/state/cmux-sentinel/usage"; mkdir -p "$state"
+printf '{"present":true}\n' > "$HOME/.local/share/amp/secrets.json"
+now=$(date +%s)
+printf '%s\n' "$now" > "$state/claude.last-success"
+printf '%s\n' "$((now - 901))" > "$state/codex.last-success"
+rm -f "$state/amp.last-success"
+printf 'USAGE_PROVIDERS="claude codex amp"\nUSAGE_STALE_AFTER_SECONDS=900\n' > "$HOME/.config/cmux/usage-sentinels.env"
+out4="$(STUB_CODEX_RPC=expanded bash "$DOCTOR" 2>&1)"
+case "$out4" in *"claude data fresh (updated "*) ok "fresh Claude update is recognized";;
+  *) bad "fresh Claude update was not recognized";; esac
+case "$out4" in *"codex data stale (last successful update 15m ago; expected within 15m)"*) ok "stale Codex data is actionable";;
+  *) bad "stale Codex data was not reported";; esac
+case "$out4" in *"amp data freshness unknown — no successful update recorded"*) ok "missing Amp freshness is explicit";;
+  *) bad "missing Amp freshness was not reported";; esac
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

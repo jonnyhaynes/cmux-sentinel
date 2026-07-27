@@ -5,12 +5,13 @@
 #   make check   what CI runs + sidebar: shellcheck + secrets + markdown + test
 #   make test    offline bridge state-machine test (stubs cmux; runs in CI too)
 #   make doctor  health-check the live setup (read-only)
+#   make sidebar-live  mount the repo sidebar for an honest human render check
 #   make fmt     rewrite shell with shfmt (OPT-IN — see note below)
 #   make help    list targets
 
 SHELL   := bash
 SCRIPTS := bin/cmux-claude-usage.sh bin/cmux-codex-usage.sh bin/cmux-amp-usage.sh bin/cmux-sentinel-doctor.sh \
-           bin/cmux-sentinel-setup.sh bin/cmux-group-sync.sh hooks/cmux-bridge.sh \
+           bin/cmux-sentinel-setup.sh bin/cmux-sidebar-live-smoke.sh bin/cmux-group-sync.sh hooks/cmux-bridge.sh \
            install.sh scripts/check-secrets.sh \
            hooks/zed-bridge.sh bin/cmux-open-in-zed.sh bin/zed-usage-tui.sh \
            tests/bridge-state.sh tests/poller-gate.sh tests/codex-poller.sh \
@@ -19,13 +20,14 @@ SCRIPTS := bin/cmux-claude-usage.sh bin/cmux-codex-usage.sh bin/cmux-amp-usage.s
            tests/amp-bridge.sh tests/amp-poller.sh
 MD      := $(wildcard *.md) $(wildcard docs/*.md)
 
-.PHONY: help check ci lint shellcheck secrets markdown test doctor sidebar fmt fmt-check
+.PHONY: help check ci lint shellcheck secrets markdown test doctor sidebar sidebar-live fmt fmt-check
 
 help:
 	@echo "make check   — shellcheck + secrets + markdown + test + sidebar (full local gate)"
 	@echo "make ci      — what CI runs (check minus sidebar; no cmux on the runner)"
 	@echo "make test    — offline bridge, poller, installer, setup, group, and Zed tests (stubs cmux)"
 	@echo "make doctor  — health-check the live setup (read-only)"
+	@echo "make sidebar-live — mount repo sidebar with live data for human visual inspection"
 	@echo "make fmt     — reformat shell scripts with shfmt (opt-in, not a gate)"
 
 # correctness: real bug-catching for the bash. -x follows `source`d files.
@@ -97,6 +99,12 @@ sidebar:
 	else \
 		echo "sidebar: cmux not found — skipping parse check"; \
 	fi
+
+# Honest runtime smoke: stages the repo sidebar under a throwaway name, mounts it
+# through cmux's live renderer, then waits briefly (or for Return in a terminal).
+# Command success is useful but deliberately NOT called a pixel/render assertion.
+sidebar-live:
+	@./bin/cmux-sidebar-live-smoke.sh
 
 check: shellcheck secrets markdown test sidebar
 lint: check

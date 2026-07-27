@@ -76,6 +76,8 @@ bad()  { fail=$((fail+1)); printf '  FAIL %s\n' "$1"; }
 is()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
 has()  { if printf '%s' "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
 hasnt(){ if printf '%s' "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+STAMP="$ROOT/home/.local/state/cmux-sentinel/usage/amp.last-success"
+nostamp() { if [ ! -e "$STAMP" ]; then ok "$1"; else bad "$1 (unexpected success stamp)"; fi; }
 
 # Real-world fixtures, byte-for-byte the shape amp 0.0.1784… prints. The "$0"/"$14"
 # are literal dollar AMOUNTS in amp's own output, not shell expansions — single
@@ -107,7 +109,7 @@ run_out() { # $1=mode
   bash "$POLLER" "$1" 2>/dev/null
 }
 cfg() { printf '%s\n' "$@" > "$ROOT/home/.config/cmux/usage-sentinels.env"; }
-reset_logs() { : > "$ROOT/.renames"; : > "$ROOT/.progress"; }
+reset_logs() { : > "$ROOT/.renames"; : > "$ROOT/.progress"; rm -f "$STAMP"; }
 
 echo "amp-poller: gating"
 
@@ -116,6 +118,7 @@ out=$(AMP_FIXTURE="$FRESH" run --print); rc=$?
 is  "disabled provider exits 0" "$rc" "0"
 has "disabled provider says so" "$out" "amp disabled"
 hasnt "disabled provider draws nothing" "$out" "%"
+nostamp "disabled provider records no freshness"
 
 cfg 'USAGE_PROVIDERS="claude amp"'
 mv "$ROOT/home/.local/share/amp/secrets.json" "$ROOT/secrets.bak"
@@ -136,6 +139,7 @@ out=$(AMP_FIXTURE="$PARTIAL" run --print)
 has "23% remaining → 77% used"  "$out" "ampu: 77% used"
 has "71% orb remaining → 29% used" "$out" "ampo: 29% used"
 has "reset phrase is amp's own" "$out" "resets in 12 days"
+nostamp "--print records no freshness"
 
 echo "amp-poller: parsing is phrase-anchored, not position-anchored"
 
@@ -181,6 +185,7 @@ has "unparseable --update clears the bar" "$(cat "$ROOT/.progress")" "CLEARED"
 reset_logs
 out=$(AMP_FIXTURE="$FRESH" AMP_FAIL=1 run --update)
 has "amp usage failure marks offline" "$(cat "$ROOT/.renames")" "⚠ offline"
+nostamp "offline paint is not a successful refresh"
 
 echo "amp-poller: --update paints the meter"
 
@@ -203,6 +208,8 @@ has "fallback title uses the detail/bar delimiter" "$renames" "|"
 is  "progress fraction is 0..1"     "$(head -1 "$ROOT/.progress" | cut -d' ' -f1)" "0.77"
 has "native label uses compact parenthesized countdown" "$(head -1 "$ROOT/.progress")" "77% (12d)"
 hasnt "native label omits redundant resets wording" "$(head -1 "$ROOT/.progress")" "resets"
+if [ -s "$STAMP" ] && grep -Eq '^[0-9]+$' "$STAMP"; then ok "complete update records freshness"
+else bad "complete update records freshness (no valid stamp)"; fi
 
 # Severity thresholds ride USED, so a nearly-exhausted allowance goes red.
 CRIT='Subscription X: 3% other usage and 100% orb usage remaining - resets upon renewal in 2 days'
