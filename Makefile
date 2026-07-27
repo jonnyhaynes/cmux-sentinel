@@ -44,12 +44,12 @@ markdown:
 # state machines: offline, stub cmux/security/curl, run on Linux CI too.
 #   bridge-state  — agent activity markers (⚡/⏳/❓)
 #   poller-gate   — Claude usage-poller gating + malformed-value clamping + bare-label resolve
-#   codex-poller  — Codex app-server RPC + duration routing + malformed-value handling
+#   codex-poller  — Codex RPC/failure classes + duration routing + sanitized diagnostics
 #   amp-poller    — Amp prose parsing + remaining→used inversion + opt-in orb meter
 #   amp-bridge    — Amp lifecycle adapter + shared bridge co-tenancy/error semantics
-#   install-hooks  — integration isolation + hook merge / preserve / idempotent / no-jq
+#   install-hooks  — integration isolation + hook merge / preserve + targeted launchd reloads
 #   sentinel-setup — provider-window gating + Amp orb opt-in + creation + shortcut layout
-#   sentinel-doctor — multi-window sentinel resolution + shortcut-layout reporting
+#   sentinel-doctor — multi-window resolution + live capability/named-limit diagnostics
 #   group-sync     — cmux-group-sync.sh group-name → anchor-title sync (gate / rename / marker / multi-window)
 #   zed-bridge     — zed-bridge.sh Zed OSC-title + JSON status sinks (agent markers, notify gating, toggles)
 #   open-in-zed    — cmux-open-in-zed.sh cmux→Zed handoff (worktree-aware command composition, modes, exec)

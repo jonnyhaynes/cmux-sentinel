@@ -83,7 +83,7 @@ echo "T4: jq unavailable → graceful no-op, settings.json untouched"
 # jq — and run with PATH pointed there. (Trimming PATH to /usr/bin:/bin isn't
 # enough: some systems ship /usr/bin/jq.)
 NOJQ="$ROOT/nojqbin"; mkdir -p "$NOJQ"
-for t in bash cat cp date dirname install mkdir mktemp rm sed; do
+for t in bash cat cmp cp date dirname id install mkdir mktemp mv rm sed; do
   p="$(command -v "$t")" && ln -sf "$p" "$NOJQ/$t"
 done
 if [ ! -e "$NOJQ/jq" ]; then ok "test bin has no jq (precondition)"; else bad "could not build a jq-less bin"; fi
@@ -165,6 +165,80 @@ printf '{"hooks":{}}\n' > "$SBX4/.claude/settings.json"
 if [ "$rc" = 0 ]; then ok "legacy Amp update exited 0"; else bad "legacy Amp update exited $rc"; fi
 if [ -x "$SBX4/.config/cmux-sentinel/cmux-bridge.sh" ]; then ok "legacy Amp dependency migrated to neutral path"; else bad "legacy Amp dependency not migrated"; fi
 if ! grep -q cmux-bridge "$SBX4/.claude/settings.json" 2>/dev/null; then ok "legacy Amp update keeps Claude hooks disabled"; else bad "legacy Amp update enabled Claude hooks"; fi
+
+echo "T11: changed loaded plists get guidance or an explicit targeted reload"
+SBX5="$ROOT/home5"; mkdir -p "$SBX5"
+RELOAD_BIN="$ROOT/reloadbin"; RELOAD_LOG="$ROOT/.launchctl"; mkdir -p "$RELOAD_BIN"
+cat > "$RELOAD_BIN/launchctl" <<'FAKE'
+#!/bin/bash
+case "${1:-}" in
+  print) case "${2:-}" in */com.cmux-codex-usage) exit 0 ;; *) exit 1 ;; esac ;;
+  bootout)
+    printf '%s\n' "$*" >> "$RELOAD_LOG"
+    [ "${STUB_BOOTOUT_FAIL:-0}" = 1 ] && exit 1
+    exit 0
+    ;;
+  bootstrap)
+    printf '%s\n' "$*" >> "$RELOAD_LOG"
+    [ "${STUB_BOOTSTRAP_FAIL:-0}" = 1 ] && exit 1
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+FAKE
+chmod +x "$RELOAD_BIN/launchctl"
+reload_env() {
+  ( cd "$ROOT" && RELOAD_LOG="$RELOAD_LOG" HOME="$SBX5" \
+      PATH="$RELOAD_BIN:/usr/bin:/bin" bash "$INSTALL" "$@" )
+}
+
+# Establish an exact generated baseline, then make only Codex's installed plist
+# stale. A normal update must rewrite it but leave the loaded job uninterrupted.
+reload_env >/dev/null 2>&1
+codex_plist="$SBX5/Library/LaunchAgents/com.cmux-codex-usage.plist"
+printf '\n<!-- stale -->\n' >> "$codex_plist"
+rm -f "$RELOAD_LOG"
+reload_out="$(reload_env 2>&1)"; rc=$?
+if [ "$rc" = 0 ]; then ok "changed loaded plist update exited 0"; else bad "changed loaded plist update exited $rc"; fi
+if [ ! -s "$RELOAD_LOG" ]; then ok "default update did not interrupt the loaded job"; else bad "default update unexpectedly called launchctl"; fi
+case "$reload_out" in
+  *"com.cmux-codex-usage is loaded"*"launchctl bootout"*"launchctl bootstrap"*"--reload-agents"*) ok "default update prints exact reload guidance" ;;
+  *) bad "default update omitted reload guidance" ;;
+esac
+
+# With explicit permission, only the changed+loaded Codex job is cycled. An
+# unchanged subsequent run must not touch launchd at all.
+printf '\n<!-- stale again -->\n' >> "$codex_plist"
+rm -f "$RELOAD_LOG"
+reload_env --reload-agents >/dev/null 2>&1; rc=$?
+if [ "$rc" = 0 ]; then ok "--reload-agents exited 0"; else bad "--reload-agents exited $rc"; fi
+if [ "$(wc -l < "$RELOAD_LOG" 2>/dev/null | tr -d ' ')" = 2 ] \
+  && grep -q '^bootout .*com.cmux-codex-usage.plist$' "$RELOAD_LOG" \
+  && grep -q '^bootstrap .*com.cmux-codex-usage.plist$' "$RELOAD_LOG"; then
+  ok "explicit reload cycles only the changed loaded Codex job"
+else bad "explicit reload calls were not the expected bootout + bootstrap"; fi
+rm -f "$RELOAD_LOG"
+reload_env --reload-agents >/dev/null 2>&1
+if [ ! -s "$RELOAD_LOG" ]; then ok "unchanged plists are never reloaded"; else bad "unchanged install touched launchd"; fi
+
+# launchctl failures must not abort the installer halfway through or hide how to
+# recover. A failed bootout leaves the old definition loaded; a failed bootstrap
+# may leave it unloaded. Both paths retain the newly written plist for a retry.
+printf '\n<!-- stale for bootout failure -->\n' >> "$codex_plist"
+rm -f "$RELOAD_LOG"
+reload_out="$(STUB_BOOTOUT_FAIL=1 reload_env --reload-agents 2>&1)"; rc=$?
+if [ "$rc" = 0 ] && printf '%s' "$reload_out" | grep -q "old definition remains loaded" \
+  && printf '%s' "$reload_out" | grep -q "launchctl bootstrap"; then
+  ok "bootout failure continues installation with exact recovery guidance"
+else bad "bootout failure aborted or omitted recovery guidance"; fi
+
+printf '\n<!-- stale for bootstrap failure -->\n' >> "$codex_plist"
+rm -f "$RELOAD_LOG"
+reload_out="$(STUB_BOOTSTRAP_FAIL=1 reload_env --reload-agents 2>&1)"; rc=$?
+if [ "$rc" = 0 ] && printf '%s' "$reload_out" | grep -q "may currently be unloaded" \
+  && printf '%s' "$reload_out" | grep -q "launchctl bootstrap"; then
+  ok "bootstrap failure continues installation with exact recovery guidance"
+else bad "bootstrap failure aborted or omitted recovery guidance"; fi
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

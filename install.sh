@@ -8,16 +8,17 @@
 set -euo pipefail
 
 # Opt-in features. Accept them as flags AND honour the env form (WITH_BRIDGE /
-# WITH_ZED / WITH_AMP) — a flag just exports the env so it survives the curl-bootstrap re-exec
-# below (which forwards env, not argv). Everything here is OFF by default, so a plain
-# install / the bare curl one-liner stays cmux-only and Zed-free — other users of the
-# repo are unaffected unless they ask for it.
+# WITH_ZED / WITH_AMP / RELOAD_AGENTS) — a flag just exports the env so it survives
+# the curl-bootstrap re-exec below (which forwards env, not argv). Everything here
+# is OFF by default, so a plain install / the bare curl one-liner stays cmux-only,
+# Zed-free, and never interrupts a running launchd job.
 for arg in "$@"; do
   case "$arg" in
     --with-zed)    export WITH_ZED=1 ;;
     --with-bridge) export WITH_BRIDGE=1 ;;
     --with-amp)    export WITH_AMP=1 ;;
-    -h|--help)     echo "usage: install.sh [--with-bridge] [--with-zed] [--with-amp]"; exit 0 ;;
+    --reload-agents) export RELOAD_AGENTS=1 ;;
+    -h|--help)     echo "usage: install.sh [--with-bridge] [--with-zed] [--with-amp] [--reload-agents]"; exit 0 ;;
     *) echo "install.sh: unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -51,6 +52,59 @@ fi
 
 cfg="$HOME/.config/cmux"
 bak() { [ -e "$1" ] && cp "$1" "$1.bak.$(date +%s)" && echo "  backed up $1"; return 0; }
+
+# Render one launchd template only when its contents changed. launchd does not
+# reread an already-loaded plist after a file replacement, so silently writing a
+# new PATH/program configuration leaves the old process definition active. A
+# normal install stays non-disruptive and prints exact reload commands; the
+# explicit --reload-agents / RELOAD_AGENTS=1 path reloads only changed+loaded jobs.
+print_reload_commands() { # $1=launchd domain $2=plist path
+  printf '      launchctl bootout %q %q\n' "$1" "$2"
+  printf '      launchctl bootstrap %q %q\n' "$1" "$2"
+}
+
+install_plist() { # $1=template $2=destination $3=launchd label $4=description
+  local template="$1" dest="$2" job="$3" description="$4" tmp domain loaded=0
+  tmp="$(mktemp)"
+  sed "s#/Users/YOUR_USERNAME#$HOME#g" "$template" >"$tmp"
+  if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
+    rm -f "$tmp"
+    echo "  = $dest  ($description; unchanged)"
+    return
+  fi
+
+  bak "$dest"
+  mv "$tmp" "$dest"
+  echo "  -> $dest  ($description; updated)"
+
+  domain="gui/$(id -u)"
+  if command -v launchctl >/dev/null 2>&1 \
+    && launchctl print "$domain/$job" >/dev/null 2>&1; then
+    loaded=1
+  fi
+  [ "$loaded" = 1 ] || return 0
+
+  if [ "${RELOAD_AGENTS:-0}" = 1 ]; then
+    echo "     reloading changed launchd job: $job"
+    if ! launchctl bootout "$domain" "$dest"; then
+      if launchctl print "$domain/$job" >/dev/null 2>&1; then
+        echo "  ⚠ couldn't stop $job; its old definition remains loaded. Retry:"
+        print_reload_commands "$domain" "$dest"
+        return 0
+      fi
+      # bootout may report failure after launchd has already removed the job.
+      # In that case continue to bootstrap rather than leaving it unloaded.
+    fi
+    if ! launchctl bootstrap "$domain" "$dest"; then
+      echo "  ⚠ couldn't restart $job; it may currently be unloaded. Recover with:"
+      print_reload_commands "$domain" "$dest"
+    fi
+  else
+    echo "  ⚠ $job is loaded, but launchd has not reread this changed plist. Reload it:"
+    print_reload_commands "$domain" "$dest"
+    echo "    (or re-run this installer with --reload-agents)"
+  fi
+}
 
 # Idempotently wire the bridge into ~/.claude/settings.json: for each Claude Code
 # hook event the bridge handles, add a {matcher:"", hooks:[{command:…cmux-bridge.sh,
@@ -131,25 +185,22 @@ else
   echo "  ~/.config/cmux/usage-sentinels.env already exists, leaving it"
 fi
 
-# 4. launchd plists, templated to this user. The Claude one is bootstrapped in the
-#    NEXT STEPS; the Codex one is deployed dormant (not loaded) so opting in is just
-#    a `launchctl bootstrap` once you've set USAGE_PROVIDERS + created cx sentinels.
+# 4. launchd plists, templated to this user. Only changed files are replaced. If a
+#    changed job is already loaded, install_plist either reloads it explicitly
+#    (--reload-agents) or prints exact commands without disrupting the live job.
+#    Provider gating remains in the pollers, so installing a plist never enables it.
 plist="$HOME/Library/LaunchAgents/com.cmux-claude-usage.plist"
-bak "$plist"
-sed "s#/Users/YOUR_USERNAME#$HOME#g" "$here/examples/com.cmux-claude-usage.plist" > "$plist"
-echo "  -> $plist"
+install_plist "$here/examples/com.cmux-claude-usage.plist" "$plist" \
+  "com.cmux-claude-usage" "Claude poller"
 cxplist="$HOME/Library/LaunchAgents/com.cmux-codex-usage.plist"
-bak "$cxplist"
-sed "s#/Users/YOUR_USERNAME#$HOME#g" "$here/examples/com.cmux-codex-usage.plist" > "$cxplist"
-echo "  -> $cxplist  (dormant — bootstrap it only if you enable Codex)"
+install_plist "$here/examples/com.cmux-codex-usage.plist" "$cxplist" \
+  "com.cmux-codex-usage" "Codex poller; dormant unless enabled"
 ampplist="$HOME/Library/LaunchAgents/com.cmux-amp-usage.plist"
-bak "$ampplist"
-sed "s#/Users/YOUR_USERNAME#$HOME#g" "$here/examples/com.cmux-amp-usage.plist" > "$ampplist"
-echo "  -> $ampplist  (dormant — bootstrap it only if you enable Amp)"
+install_plist "$here/examples/com.cmux-amp-usage.plist" "$ampplist" \
+  "com.cmux-amp-usage" "Amp poller; dormant unless enabled"
 gsplist="$HOME/Library/LaunchAgents/com.cmux-group-sync.plist"
-bak "$gsplist"
-sed "s#/Users/YOUR_USERNAME#$HOME#g" "$here/examples/com.cmux-group-sync.plist" > "$gsplist"
-echo "  -> $gsplist  (dormant — bootstrap it only if you set GROUP_NAME_SYNC=1)"
+install_plist "$here/examples/com.cmux-group-sync.plist" "$gsplist" \
+  "com.cmux-group-sync" "group sync; dormant unless enabled"
 
 # 5. working-state hooks bridge. Install when explicitly requested (WITH_BRIDGE=1)
 #    OR when one is already present — so a plain re-run still UPDATES an existing
@@ -247,8 +298,9 @@ cat <<'NEXT'
    then run `cmux reload-config` (applies live on current builds). If external socket
    commands still get rejected later, the mode regressed — fully restart cmux.
 
-5. Start auto-refresh for every provider you enabled (skip the others; an already
-   loaded job can be left alone):
+5. Start auto-refresh for every provider you enabled (skip the others). If the
+   installer says a loaded plist changed, run its printed bootout + bootstrap
+   commands, or re-run `./install.sh --reload-agents` to reload changed jobs only:
      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-claude-usage.plist
      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-codex-usage.plist
      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-amp-usage.plist

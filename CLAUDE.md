@@ -148,7 +148,8 @@ cmux sidebar validate workspaces && cmux sidebar reload   # synthetic interpreta
 ./bin/cmux-claude-usage.sh --raw       # raw API JSON (no token)
 ./bin/cmux-claude-usage.sh --update    # writes title fallback + native progress
 ./bin/cmux-codex-usage.sh --print      # Codex: live utilization via account/rateLimits/read
-./bin/cmux-codex-usage.sh --raw        # normalized app-server rate-limit JSON (no token)
+./bin/cmux-codex-usage.sh --raw        # normalized JSON; account-scoped reset-credit ids removed
+./bin/cmux-codex-usage.sh --raw-full   # complete account-private JSON — inspect locally only
 ./bin/cmux-codex-usage.sh --update     # writes cx5h/cx7d title + progress (needs codex enabled)
 ./bin/cmux-codex-usage.sh --buckets    # which windows the account HAS (empty = can't tell); drives setup
 ./bin/cmux-amp-usage.sh --print        # Amp: monthly subscription allowance (scraped from `amp usage`)
@@ -160,9 +161,9 @@ cmux sidebar validate workspaces && cmux sidebar reload   # synthetic interpreta
 ./bin/cmux-group-sync.sh --update      # rename group anchors to the group name (needs GROUP_NAME_SYNC=1)
 
 # offline tests (stub cmux/security/curl/$HOME — run in CI too)
-make test   # bridge-state(36) poller-gate(34) codex-poller(66) install-hooks(35) sentinel-setup(50)
-            # sentinel-doctor(23) group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(23)
-            # amp-bridge(43) amp-poller(45) = 417 assertions total
+make test   # bridge-state(36) poller-gate(34) codex-poller(76) install-hooks(43) sentinel-setup(50)
+            # sentinel-doctor(28) group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(23)
+            # amp-bridge(43) amp-poller(45) = 440 assertions total
 ```
 
 ## Architecture / where things live
@@ -170,10 +171,10 @@ make test   # bridge-state(36) poller-gate(34) codex-poller(66) install-hooks(35
 ```text
 sidebars/workspaces.swift  the sidebar. isClaudeMeter()/isCodexMeter()/isAmpMeter() = title-label `.hasPrefix` per provider; isUsageMeter() = any.
 bin/cmux-claude-usage.sh    Claude usage poller. make_bar / sev_dot / mark_offline / bucket_field / to_pct / resolve_ref(+_paint, multi-window).
-bin/cmux-codex-usage.sh     Codex usage poller (short-lived account/rateLimits/read app-server RPC; Codex owns auth/refresh). fetch_usage / _rpc_wait_for_id / make_bar / sev_dot / mark_offline / to_pct / resolve_ref(+_paint) / --buckets (live windows, for setup).
+bin/cmux-codex-usage.sh     Codex usage poller (short-lived account/rateLimits/read app-server RPC; Codex owns auth/refresh). Default meter + read-only named limits/reset credits; sanitized --raw / local-only --raw-full; actionable RPC failure classes; --buckets drives setup.
 bin/cmux-amp-usage.sh       Amp usage poller (scrapes `amp usage` PROSE — no --json). Monthly allowance, not windows. REMAINING→USED inversion. ampu (agent) + ampo (orb, opt-in AMP_ORB_METER=1).
 bin/cmux-sentinel-setup.sh  idempotent sentinel creation (per USAGE_PROVIDERS; known-live buckets only, fail-open on unknown) + auto-naming guard probe + ⌘N shortcut layout (layout/sentinel_window, --no-layout).
-bin/cmux-sentinel-doctor.sh READ-ONLY wiring report: cmux/sidebar/bridge/auto-refresh, installed × enabled × sentinel per provider, ⌘N layout drift, snapshot data.
+bin/cmux-sentinel-doctor.sh READ-ONLY wiring report: cmux/sidebar/bridge/auto-refresh, installed × enabled × live capability × sentinel per provider, informational Codex limits/reset credits, ⌘N layout drift, snapshot data.
 bin/cmux-group-sync.sh      workspace-GROUP name → anchor-title sync (opt-in GROUP_NAME_SYNC). split-marker / multi-window / --list|--raw|--update.
 hooks/cmux-bridge.sh        Claude Code → cmux agent-state bridge (⚡ working / ⏳ compacting / ❓ waiting-on-you rows). AGENT-AGNOSTIC: CMUX_SENTINEL_SESSION_PID / _AGENT_LABEL / _LOG_SOURCE let any agent's adapter reuse it.
 hooks/amp-bridge.ts         Amp plugin (Bun/TS) → drives cmux-bridge.sh. Thin ADAPTER, no own state, so amp+claude co-tenants ref-count in one $WORKROOT. 2-of-3 states (no ⏳; ❓ opt-in).
@@ -248,6 +249,13 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   backend remains internal → parse defensively; API-key logins aren't covered (and any existing
   sentinels must still be closed to hide their panel). `codex login status` only confirms a stored
   auth mode, not token health; an invalidated refresh token still needs `codex logout` + re-login.
+  RPC failures are classified without echoing response bodies: auth failures give that exact
+  recovery, while timeout/transport/network/schema failures remain distinct. `rateLimits` is the
+  generic sidebar projection. Optional `rateLimitsByLimitId` entries are open-ended backend-defined
+  named/model limits: show them only in `--print`/doctor, prefer `limitName`, never treat opaque ids
+  as stable, and never auto-create sentinels for them. Optional reset credits are likewise read-only
+  diagnostics; never consume them. Normal `--raw` removes account-scoped reset-credit ids;
+  `--raw-full` is explicitly account-private/local-only and must never be pasted into logs.
   Current source audit: `docs/usage-data-source-research.md`. Earlier decision record:
   `.claude/research/2026-07-06-codex-usage-api-source.md`. To add a FOURTH provider: create a
   sentinel, add an `isXMeter()` predicate + an `if isXMeter(w)` line to `isUsageMeter()` + an
@@ -293,7 +301,8 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   closes anything** — retiring a live sentinel is a manual `cmux workspace close`.
   Diagnostics use the separate machine-readable `--status` mode, which distinguishes
   `available` bucket sets from `unknown`, `disabled`, and `uninstalled`; doctor retains the current
-  layout on `unknown` instead of inventing a missing-window warning.
+  layout on `unknown` instead of inventing a missing-window warning. Doctor must prove the live RPC
+  before saying meters are active—a stored ChatGPT login alone is not availability.
   See `.claude/research/2026-07-16-codex-5h-window-gone-for-pro.md`.
 - **Provider selection is gated, not configured in the sidebar** (it can't read config — only
   workspace data). A provider's panel shows IFF its sentinels exist, and the sidebar auto-hides any
@@ -309,6 +318,10 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   current build `reload-config` applies this **live** (proven: an external launchd kick landed its
   renames with no restart) — the earlier "needs a full cmux restart" note was outdated. If external
   (launchd) socket commands start getting rejected, the automation mode regressed → restart cmux.
+- **launchd does not reread a changed loaded plist.** `install.sh` compares generated plist content,
+  leaves unchanged jobs alone, and by default prints exact `bootout` + `bootstrap` commands for a
+  changed+loaded job. `--reload-agents` / `RELOAD_AGENTS=1` explicitly performs only those targeted
+  reloads. Do not cycle unchanged jobs or silently disrupt loaded agents on a plain install.
 
 ## Conventions & security
 

@@ -4,7 +4,7 @@ An opinionated [cmux](https://cmux.com) **custom sidebar** — a clean, monospac
 workspaces list with live agent states and pluggable **AI usage meters**.
 
 <p align="center">
-  <img src="assets/sidebar.png" alt="cmux-sentinel usage dashboard — humanized Claude, Codex, and Amp meters" width="320">
+  <img src="assets/sidebar.png" alt="cmux-sentinel sidebar with Claude, Codex, and Amp usage meters plus live agent states" width="320">
 </p>
 
 The top usage panels show live Claude, Codex, and Amp allowances with native progress bars (plus a
@@ -121,6 +121,7 @@ cd cmux-sentinel
 | Amp states | `--with-amp` / `WITH_AMP=1` | Installs the Amp plugin plus its neutral shared dependency under `~/.config/cmux-sentinel` |
 | Zed | `--with-zed` / `WITH_ZED=1` | Installs and registers the opt-in Zed helpers |
 | Usage providers | `USAGE_PROVIDERS` | Chooses `claude`, `codex`, and/or `amp` meter pollers; default is `claude` |
+| Reload changed jobs | `--reload-agents` / `RELOAD_AGENTS=1` | Reloads only launchd jobs whose generated plist changed and is already loaded |
 
 Amp-only installation does **not** register Claude hooks. If both agents are enabled, they still use
 the same ref-counted state model so one agent ending cannot clear another agent's active marker.
@@ -147,7 +148,9 @@ remaining manual steps. In short:
    `cmux reload-config` (applies live on current builds; if renames still get rejected, restart cmux).
 5. **Start auto-refresh:** bootstrap the matching launchd plist for each enabled provider if it is
    not already loaded: `com.cmux-claude-usage.plist`, `com.cmux-codex-usage.plist`, and/or
-   `com.cmux-amp-usage.plist` under `~/Library/LaunchAgents/`.
+   `com.cmux-amp-usage.plist` under `~/Library/LaunchAgents/`. On an update, launchd does not reread
+   a changed loaded plist: the installer prints exact `bootout` + `bootstrap` commands, or
+   `./install.sh --reload-agents` safely reloads only jobs that are both changed and loaded.
 6. **Verify the pipeline:** `make doctor` (or `~/bin/cmux-sentinel-doctor.sh`) — a read-only check
    that the bridge, hooks, launchd job, automation mode, and sentinels are all wired.
 
@@ -221,8 +224,12 @@ Then `cmux sidebar reload` to repaint. Notes:
 
 - An **already-installed bridge updates automatically** on a plain re-run — no `WITH_BRIDGE=1`
   needed (that flag is only for *adding* the bridge the first time).
-- The launchd poller picks up the new script on its next run; **bridge script-body changes are
-  read live**, so only a brand-new hook-event *registration* needs a Claude Code restart.
+- A launchd poller picks up a new **script** on its next run. A changed **plist definition** is
+  different: launchd keeps the loaded definition until it is reloaded. The installer detects that
+  exact case and prints safe commands; pass `--reload-agents` (or `RELOAD_AGENTS=1`) to perform only
+  those required reloads. Unchanged jobs are never cycled.
+- **Bridge script-body changes are read live**, so only a brand-new hook-event *registration* needs
+  a Claude Code restart.
 - `make doctor` (or `~/bin/cmux-sentinel-doctor.sh`) confirms everything is still wired afterward.
 
 ---
@@ -273,7 +280,9 @@ Codex ships built-in but is **off by default** (out-of-the-box is Claude-only). 
 
 `~/bin/cmux-sentinel-doctor.sh` cross-checks installed × enabled × sentinel-present across every
 cmux window. Codex requires a ChatGPT-plan login managed by the Codex CLI (`codex login`); API-key
-logins are not covered by this account allowance.
+logins are not covered by this account allowance. A stored login does not prove the token still
+works: the doctor also runs the live capability RPC and gives the exact `codex logout` → `codex
+login` recovery when reauthentication is required.
 
 ### Enable the Amp provider
 
@@ -321,6 +330,15 @@ The response's `primary`/`secondary` positions are not stable. The poller routes
 a numeric `windowDurationMins`: under one day to `cx5h`, one day or more to `cx7d`. Some plans
 currently have no short window, so setup skips that sentinel on a positive answer. Malformed or
 unknown durations are never guessed as a 5-hour bucket.
+
+`rateLimits` remains the generic sidebar allowance. Optional `rateLimitsByLimitId` entries can add
+named/model-specific allowances; `--print` and the doctor report those as **read-only information**,
+but never create another sentinel or consume another ⌘ shortcut. Their backend ids are opaque and
+not a stable integration contract, so display prefers `limitName`. Optional usage-reset credits are
+also informational only—the tool reports availability/status and leaves redemption to Codex.
+
+For debugging, `--raw` prints normalized JSON with account-scoped reset-credit ids removed.
+`--raw-full` deliberately preserves the complete response, warns first, and must stay local.
 
 ### Claude provider — data source
 
@@ -380,7 +398,7 @@ current validation ceiling and upstream implementation evidence are recorded in
 
 ```text
 bin/cmux-claude-usage.sh     Claude usage poller — OAuth usage endpoint (--print | --raw | --update)
-bin/cmux-codex-usage.sh      Codex usage poller — account/rateLimits/read RPC (--print | --raw | --update | --buckets | --status)
+bin/cmux-codex-usage.sh      Codex usage poller — account/rateLimits/read RPC (--print | --raw | --raw-full | --update | --buckets | --status)
 bin/cmux-amp-usage.sh        Amp monthly-allowance poller — `amp usage` parser (--print | --raw | --update | --buckets)
 bin/cmux-sentinel-setup.sh   idempotently create the meter sentinel workspaces (+ auto-naming guard)
 bin/cmux-group-sync.sh       workspace-group name → anchor-title sync (opt-in; --list | --raw | --update)
@@ -408,9 +426,10 @@ install.sh                   file placement + next-steps
 
 OAuth tokens stay in provider-owned credential stores and are sent only by provider-owned clients
 or the Claude poller to their provider endpoints; they are never printed or copied into this repo.
-The Codex poller delegates auth entirely to Codex's app server. Amp's `--raw` mode can include the
-signed-in email and is explicitly local-only. Sentinels store no ids or secrets: they are resolved
-from title labels every run.
+The Codex poller delegates auth entirely to Codex's app server. Its normal `--raw` removes
+account-scoped reset-credit ids; `--raw-full` is explicitly account-private and local-only. Amp's
+`--raw` mode can include the signed-in email and is also explicitly local-only. Sentinels store no
+ids or secrets: they are resolved from title labels every run.
 
 ## Contributing
 

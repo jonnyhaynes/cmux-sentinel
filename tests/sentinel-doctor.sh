@@ -93,7 +93,13 @@ fi
 while IFS= read -r line; do
   case "$(printf '%s' "$line" | jq -r '.id // empty')" in
     0) printf '{"id":0,"result":{"userAgent":"fake","codexHome":"/tmp/fake","platformFamily":"unix","platformOs":"linux"}}\n' ;;
-    1) printf '{"id":1,"error":{"code":-32603,"message":"offline"}}\n' ;;
+    1)
+      if [ "${STUB_CODEX_RPC:-expired}" = expanded ]; then
+        printf '%s\n' '{"id":1,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":8,"windowDurationMins":10080,"resetsAt":2000000000},"secondary":null},"rateLimitsByLimitId":{"codex":{"limitId":"codex","primary":{"usedPercent":8,"windowDurationMins":10080,"resetsAt":2000000000}},"codex_test_model":{"limitId":"codex_test_model","limitName":"Test Model","primary":{"usedPercent":6,"windowDurationMins":10080,"resetsAt":2000000000}},"codex_opaque":{"limitId":"codex_opaque","limitName":null,"primary":{"usedPercent":3,"windowDurationMins":10080,"resetsAt":2000000000}}},"rateLimitResetCredits":{"availableCount":1,"credits":[{"id":"RateLimitResetCredit_fake_private","status":"available","title":"Full reset"}]}}}'
+      else
+        printf '{"id":1,"error":{"code":-32603,"message":"GET usage failed: 401 Unauthorized: token_expired"}}\n'
+      fi
+      ;;
   esac
 done
 FAKE
@@ -129,7 +135,8 @@ if has "Amp shared bridge installed"; then ok "neutral Amp bridge detected"; els
 if has "no agent-state bridge installed"; then bad "Amp-only setup reported as bridge-less"; else ok "no false bridge-missing warning"; fi
 
 echo "T4: Codex unknown capability retains layout without false creation advice"
-if has "codex capability unknown"; then ok "unknown Codex capability is explicit"; else bad "unknown Codex capability not reported"; fi
+if has "live allowance unavailable — Codex login expired; run codex logout, then codex login"; then ok "unknown Codex capability is explicit and actionable"; else bad "actionable Codex capability failure not reported"; fi
+if has "stored login alone does not prove meters are active"; then ok "stored login is not mistaken for live availability"; else bad "stored login was presented as active"; fi
 if has "no 'cx5h' sentinel — capability unknown"; then ok "missing cx5h layout retained"; else bad "missing cx5h retention not reported"; fi
 if has "no 'cx5h' sentinel (title"; then bad "unknown capability suggested creating cx5h"; else ok "no false cx5h creation warning"; fi
 if has "snapshot has no 'cx5h'"; then bad "snapshot contradicted unknown-layout retention"; else ok "snapshot retains unknown Codex layout"; fi
@@ -159,6 +166,18 @@ case "$out2" in
   *"cmux workspace close w11 --window win-b"*) ok "cross-window close guidance keeps its window" ;;
   *) bad "cross-window close guidance omitted its window" ;;
 esac
+
+echo "T7: additional Codex limits and reset credits are read-only diagnostics"
+printf 'USAGE_PROVIDERS="claude codex"\n' > "$HOME/.config/cmux/usage-sentinels.env"
+out3="$(STUB_CODEX_RPC=expanded bash "$DOCTOR" 2>&1)"
+case "$out3" in *"codex: live allowance available → default meter data valid"*) ok "live capability validates default meter data";;
+  *) bad "live capability was not reported valid";; esac
+case "$out3" in *"codex additional limit: Test Model — 6% used (7d window); informational only, no extra workspace"*) ok "additional named limit shown without sentinel advice";;
+  *) bad "additional named limit diagnostic missing";; esac
+case "$out3" in *"codex usage resets: 1 available (read-only; redeem in Codex)"*"codex reset credit: Full reset — available"*) ok "reset-credit count, title, and status shown read-only";;
+  *) bad "reset-credit diagnostics missing";; esac
+case "$out3" in *"codex_test_model"*|*"codex_opaque"*|*"RateLimitResetCredit_fake_private"*) bad "opaque Codex ids leaked into doctor output";;
+  *) ok "doctor never prints opaque limit or reset-credit ids";; esac
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
