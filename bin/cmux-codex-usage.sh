@@ -31,8 +31,9 @@
 # for ANY usage pattern. Source audit: docs/usage-data-source-research.md.
 #
 # Modes:
-#   --print     fetch + print parsed values (no cmux writes)
-#   --raw       fetch + print the normalized app-server rate-limit JSON
+#   --print     fetch + print parsed default + additional limits (no cmux writes)
+#   --raw       print normalized JSON with opaque reset-credit ids removed
+#   --raw-full  print complete normalized JSON (account-private; keep local)
 #   --update    fetch + paint both sentinel workspaces (title + native progress bar)
 #   --buckets   print the labels this account HAS a live window for (one per line);
 #               prints NOTHING when it can't tell. For cmux-sentinel-setup.sh.
@@ -66,17 +67,24 @@ USAGE_PROVIDERS="${USAGE_PROVIDERS:-claude}"
 # App-server RPC process state. One short-lived process per poll keeps this Bash 3.2
 # compatible without adding a daemon, Python, or another runtime dependency.
 RPC_DIR=""; RPC_PID=""
+RPC_INIT_INTERVALS="${CODEX_RPC_INIT_INTERVALS:-50}"
+RPC_READ_INTERVALS="${CODEX_RPC_READ_INTERVALS:-300}"
+case "$RPC_INIT_INTERVALS" in ''|*[!0-9]*) RPC_INIT_INTERVALS=50 ;; esac
+case "$RPC_READ_INTERVALS" in ''|*[!0-9]*) RPC_READ_INTERVALS=300 ;; esac
 
 die() { echo "ERR: $*" >&2; exit 1; }
 
-status_json() { # $1=status  $2=reason  $3=has-5h(0/1)  $4=has-7d(0/1)
+status_json() { # $1=status $2=reason $3=has-5h $4=has-7d $5=additional JSON $6=reset summary/null
   jq -cn --arg status "$1" --arg reason "$2" \
     --arg b5 "${3:-0}" --arg b7 "${4:-0}" \
-    --arg l5 "$LABEL_CX5H" --arg l7 "$LABEL_CX7D" '
+    --arg l5 "$LABEL_CX5H" --arg l7 "$LABEL_CX7D" \
+    --argjson additional "${5:-[]}" --argjson resetCredits "${6:-null}" '
       {status: $status,
        buckets: [if $b5 == "1" then $l5 else empty end,
                  if $b7 == "1" then $l7 else empty end],
-       reason: $reason}'
+       reason: $reason,
+       additionalLimits: $additional,
+       resetCredits: $resetCredits}'
 }
 
 provider_enabled() {
@@ -159,68 +167,126 @@ _clear_progress() { # $1 = label
 # remove the private transport directory. Best-effort and safe to call after a
 # partial startup.
 _rpc_cleanup() {
-  local i=0
+  local i=0 state=""
   exec 3>&-
   if [ -n "$RPC_PID" ]; then
     while kill -0 "$RPC_PID" 2>/dev/null && [ "$i" -lt 20 ]; do
+      state=$(ps -o stat= -p "$RPC_PID" 2>/dev/null | tr -d '[:space:]')
+      case "$state" in ''|Z*) break ;; esac
       sleep 0.05; i=$((i + 1))
     done
-    kill "$RPC_PID" 2>/dev/null || true
+    case "$state" in ''|Z*) : ;; *) kill "$RPC_PID" 2>/dev/null || true ;; esac
     wait "$RPC_PID" 2>/dev/null || true
   fi
   [ -z "$RPC_DIR" ] || rm -rf "$RPC_DIR"
   RPC_DIR=""; RPC_PID=""
 }
 
+_rpc_has_id() { # $1=output file  $2=response id
+  jq -Re --argjson id "$2" 'fromjson? | select(.id == $id)' "$1" >/dev/null 2>&1
+}
+
 # Poll an append-only JSONL output file for one response id. Notifications may
 # interleave, so position is never assumed. $3 is a count of 100ms intervals.
+# Returns 2 when the process exits first and 3 on timeout, so diagnostics can say
+# what actually failed without exposing Codex's response body.
 _rpc_wait_for_id() { # $1=output file  $2=response id  $3=max intervals
-  local out="$1" id="$2" max="$3" i=0
+  local out="$1" id="$2" max="$3" i=0 state
   while [ "$i" -lt "$max" ]; do
     # Read raw lines independently: an app-server notification may be mid-write
     # at EOF, and one torn line must not hide an earlier complete response.
-    jq -Re --argjson id "$id" 'fromjson? | select(.id == $id)' "$out" >/dev/null 2>&1 && return 0
-    kill -0 "$RPC_PID" 2>/dev/null || return 1
+    _rpc_has_id "$out" "$id" && return 0
+    # Check once more after observing process death: the response can finish its
+    # write between the first read and the liveness check.
+    kill -0 "$RPC_PID" 2>/dev/null || { _rpc_has_id "$out" "$id" && return 0; return 2; }
+    # A dead child remains visible to `kill -0` as a zombie until Bash reaps it,
+    # and `jobs -pr` can still briefly report it as running in non-interactive
+    # shells. `ps` gives us the process state without consuming its exit status.
+    state=$(ps -o stat= -p "$RPC_PID" 2>/dev/null | tr -d '[:space:]')
+    case "$state" in ''|Z*) _rpc_has_id "$out" "$id" && return 0; return 2 ;; esac
     sleep 0.1; i=$((i + 1))
   done
-  return 1
+  return 3
+}
+
+_rpc_failure_json() { # $1=sanitized internal error code
+  printf '{"_cmuxSentinelError":"%s"}' "$1"
+}
+
+_rpc_classify_response() { # $1=response JSON
+  local message
+  message=$(printf '%s' "$1" | jq -r '.error.message // ""' 2>/dev/null)
+  case "$message" in
+    *token_expired*|*"authentication token is expired"*|*"refresh token was already used"*|*"401 Unauthorized"*)
+      printf 'login-expired' ;;
+    *"error sending request"*|*"connection refused"*|*"failed to connect"*|*"dns error"*|*"network"*)
+      printf 'network' ;;
+    *) printf 'rpc-failed' ;;
+  esac
+}
+
+failure_message() { # $1=sanitized internal error code
+  case "$1" in
+    login-expired) printf 'Codex login expired; run codex logout, then codex login' ;;
+    network)       printf 'Codex backend is unreachable; check the network and retry' ;;
+    timeout)       printf 'Codex app server timed out while reading rate limits' ;;
+    app-server-exited) printf 'Codex app server exited before returning rate limits' ;;
+    protocol)      printf 'Codex app-server response was not recognized; update Codex and retry' ;;
+    *)             printf 'Codex rate-limit RPC failed' ;;
+  esac
 }
 
 # Ask a short-lived Codex app server for its normalized account snapshot. A FIFO
 # keeps stdin open until the id=1 response arrives; closing it early races the
 # server's shutdown and can discard the response. OAuth never enters this script.
 fetch_usage() {
-  local fifo out err response rc=1
+  local fifo out err response rc=1 failure="app-server-exited" wait_rc=0
   # A server crash can close the FIFO between handshake writes. Ignore SIGPIPE so
   # printf returns failure and the normal offline + cleanup path still runs.
   trap '' PIPE
   trap '_rpc_cleanup' EXIT
-  RPC_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cmux-codex-rpc.XXXXXX") || return 1
+  RPC_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cmux-codex-rpc.XXXXXX") \
+    || { _rpc_failure_json "app-server-exited"; trap - EXIT; return 1; }
   fifo="$RPC_DIR/in"; out="$RPC_DIR/out"; err="$RPC_DIR/err"
-  mkfifo "$fifo" || { _rpc_cleanup; return 1; }
+  mkfifo "$fifo" || { _rpc_failure_json "app-server-exited"; _rpc_cleanup; trap - EXIT; return 1; }
 
   codex app-server --stdio <"$fifo" >"$out" 2>"$err" &
   RPC_PID=$!
-  exec 3>"$fifo" || { _rpc_cleanup; return 1; }
-  printf '%s\n' \
-    '{"id":0,"method":"initialize","params":{"clientInfo":{"name":"cmux-sentinel","version":"1"}}}' >&3 2>/dev/null \
-    || { _rpc_cleanup; trap - EXIT; return 1; }
-
-  if _rpc_wait_for_id "$out" 0 50 \
-    && jq -Re 'fromjson? | select(.id == 0 and has("result"))' "$out" >/dev/null 2>&1; then
-    printf '%s\n' \
-      '{"method":"initialized"}' \
-      '{"id":1,"method":"account/rateLimits/read"}' >&3 2>/dev/null \
-      || { _rpc_cleanup; trap - EXIT; return 1; }
-    if _rpc_wait_for_id "$out" 1 300; then
-      response=$(jq -Rc 'fromjson? | select(.id == 1)' "$out" 2>/dev/null | tail -1)
-      if printf '%s' "$response" | jq -e 'has("result")' >/dev/null 2>&1; then
-        printf '%s' "$response" | jq -c '.result'
-        rc=$?
+  if exec 3>"$fifo"; then
+    if printf '%s\n' \
+      '{"id":0,"method":"initialize","params":{"clientInfo":{"name":"cmux-sentinel","version":"1"}}}' >&3 2>/dev/null; then
+      _rpc_wait_for_id "$out" 0 "$RPC_INIT_INTERVALS"; wait_rc=$?
+      case "$wait_rc" in 2) failure="app-server-exited" ;; 3) failure="timeout" ;; esac
+      if [ "$wait_rc" = 0 ]; then
+        response=$(jq -Rc 'fromjson? | select(.id == 0)' "$out" 2>/dev/null | tail -1)
+        if printf '%s' "$response" | jq -e 'has("result")' >/dev/null 2>&1; then
+          # Keep the two protocol writes separate. On Bash 3.2 a multi-argument
+          # printf racing a closed FIFO can leak the unwritten second argument to
+          # stdout, contaminating this function's JSON result.
+          if printf '%s\n' '{"method":"initialized"}' >&3 2>/dev/null \
+            && printf '%s\n' '{"id":1,"method":"account/rateLimits/read"}' >&3 2>/dev/null; then
+            _rpc_wait_for_id "$out" 1 "$RPC_READ_INTERVALS"; wait_rc=$?
+            case "$wait_rc" in 2) failure="app-server-exited" ;; 3) failure="timeout" ;; esac
+            if [ "$wait_rc" = 0 ]; then
+              response=$(jq -Rc 'fromjson? | select(.id == 1)' "$out" 2>/dev/null | tail -1)
+              if printf '%s' "$response" | jq -e 'has("result")' >/dev/null 2>&1; then
+                printf '%s' "$response" | jq -c '.result'
+                rc=$?
+              elif printf '%s' "$response" | jq -e 'has("error")' >/dev/null 2>&1; then
+                failure=$(_rpc_classify_response "$response")
+              else
+                failure="protocol"
+              fi
+            fi
+          fi
+        else
+          failure="protocol"
+        fi
       fi
     fi
   fi
 
+  [ "$rc" = 0 ] || _rpc_failure_json "$failure"
   _rpc_cleanup
   trap - EXIT
   return "$rc"
@@ -245,6 +311,89 @@ reset_epoch() { # $1 = window JSON
   at=$(printf '%s' "$1" | jq -r '.resetsAt // empty' 2>/dev/null)
   case "$at" in '' | null) : ;; *[!0-9]*) at="" ;; esac
   printf '%s' "$at"
+}
+
+duration_label() { # $1=window minutes
+  local mins="${1:-0}"
+  case "$mins" in ''|*[!0-9]*) printf '?'; return ;; esac
+  if [ "$mins" -ge 1440 ] && [ $((mins % 1440)) = 0 ]; then printf '%dd' "$((mins / 1440))"
+  elif [ "$mins" -ge 60 ] && [ $((mins % 60)) = 0 ]; then printf '%dh' "$((mins / 60))"
+  else printf '%dm' "$mins"; fi
+}
+
+# Additional named limits are an open-ended backend map. Keep opaque ids as
+# observation-local identity only, prefer limitName for display, validate each
+# window independently, and never let one malformed extra invalidate the default
+# Codex meter. These are diagnostics only — no extra sentinel/⌘ slot is created.
+additional_limits_json() { # $1=full normalized response
+  printf '%s' "$1" | jq -c '
+    def clean: gsub("[\\r\\n\\t]"; " ") | .[0:80];
+    if ((.rateLimitsByLimitId // null) | type) != "object" then []
+    else [
+      .rateLimitsByLimitId | to_entries[]
+      | select((.value | type) == "object")
+      | select(.key != "codex" and .value.limitId != "codex")
+      | . as $entry
+      | [
+          ({kind: "primary", value: $entry.value.primary}),
+          ({kind: "secondary", value: $entry.value.secondary})
+        ]
+        | map(select((.value | type) == "object"
+                     and (.value.usedPercent | type) == "number"
+                     and (.value.windowDurationMins | type) == "number"))
+        | map({kind, usedPercent: .value.usedPercent,
+               windowDurationMins: .value.windowDurationMins,
+               resetsAt: (if (.value.resetsAt | type) == "number" then .value.resetsAt else null end)}) as $windows
+      | select(($windows | length) > 0)
+      | {id: (if ($entry.value.limitId | type) == "string" and ($entry.value.limitId | length) > 0
+              then ($entry.value.limitId | clean) else ($entry.key | clean) end),
+         name: (if ($entry.value.limitName | type) == "string" and (($entry.value.limitName | gsub("[\\r\\n\\t]"; " ") | length) > 0)
+                then ($entry.value.limitName | clean)
+                elif ($entry.value.limitId | type) == "string" and ($entry.value.limitId | length) > 0
+                then ($entry.value.limitId | clean)
+                else ($entry.key | clean) end),
+         windows: $windows}
+    ] end' 2>/dev/null || printf '[]'
+}
+
+reset_credits_json() { # $1=full normalized response
+  printf '%s' "$1" | jq -c '
+    def clean: gsub("[\\r\\n\\t]"; " ") | .[0:80];
+    if ((.rateLimitResetCredits // null) | type) != "object" then null
+    else .rateLimitResetCredits as $reset
+      | {availableCount:
+           (if ($reset.availableCount | type) == "number" and $reset.availableCount >= 0
+            then ($reset.availableCount | floor) else null end),
+         credits:
+           [ $reset.credits[]?
+             | select(type == "object")
+             | {status: (if (.status | type) == "string" then (.status | clean) else null end),
+                resetType: (if (.resetType | type) == "string" then (.resetType | clean) else null end),
+                title: (if (.title | type) == "string" then (.title | clean) else null end),
+                expiresAt: (if (.expiresAt | type) == "number" then .expiresAt else null end)} ]}
+    end' 2>/dev/null || printf 'null'
+}
+
+print_additional_limits() { # $1=additional-limits JSON  $2=reset summary/null
+  local name used mins resets human label count title
+  while IFS=$'\t' read -r name used mins resets; do
+    [ -n "$name" ] || continue
+    label=$(duration_label "$mins")
+    human=$(humanize_until "$resets")
+    printf 'extra  %s  %s%% · %s window · resets %s\n' "$name" "$(to_pct "$used")" "$label" "$human"
+  done < <(printf '%s' "$1" | jq -r '.[] | .name as $name | .windows[] | [$name, .usedPercent, .windowDurationMins, (.resetsAt // "")] | @tsv' 2>/dev/null)
+  count=$(printf '%s' "$2" | jq -r '.availableCount // "null"' 2>/dev/null)
+  title=$(printf '%s' "$2" | jq -r '[.credits[]? | select(.status == "available") | .title // empty] | first // empty' 2>/dev/null)
+  [ -n "$title" ] && title=" · $title"
+  case "$count" in ''|null|*[!0-9]*) : ;; 1) echo "reset  1 usage reset available${title} · redeem in Codex" ;;
+    *) [ "$count" -gt 1 ] && echo "reset  $count usage resets available${title} · redeem in Codex" ;; esac
+}
+
+sanitized_raw_json() { # $1=full normalized response
+  printf '%s' "$1" | jq '
+    if (.rateLimitResetCredits.credits | type) == "array"
+    then .rateLimitResetCredits.credits |= map(del(.id))
+    else . end' 2>/dev/null
 }
 
 # integer percent (0-100) -> unicode block bar with 1/8-cell resolution.
@@ -327,7 +476,7 @@ _update_bucket() { # $1=label  $2=na(0/1)  $3=pct  $4=human_reset
 }
 
 main() {
-  local mode="${1:---print}" json
+  local mode="${1:---print}" json fetch_rc failure_code reason extras reset_summary
 
   # Provider gate (robustness): a disabled or not-logged-in provider is a clean
   # no-op — no error spam. Existing sentinels are not removed here, so panel
@@ -344,13 +493,26 @@ main() {
     exit 0
   fi
 
-  json=$(fetch_usage) || {
-    if [ "$mode" = "--status" ]; then status_json "unknown" "Codex rate-limit RPC failed" 0 0; exit 0; fi
+  json=$(fetch_usage); fetch_rc=$?
+  if [ "$fetch_rc" != 0 ]; then
+    # Select only our internal marker if a dying FIFO emitted protocol debris.
+    # Never surface the app-server response body in status or error output.
+    failure_code=$(printf '%s' "$json" | jq -s -r \
+      'map(select(type == "object" and has("_cmuxSentinelError"))) | last | ._cmuxSentinelError // "rpc-failed"' \
+      2>/dev/null)
+    [ -n "$failure_code" ] || failure_code="rpc-failed"
+    reason=$(failure_message "$failure_code")
+    if [ "$mode" = "--status" ]; then status_json "unknown" "$reason" 0 0; exit 0; fi
     [ "$mode" = "--update" ] && mark_offline "offline"
-    die "Codex account/rateLimits/read failed (login expired? Codex outdated? offline?)"
-  }
+    die "$reason"
+  fi
 
   if [ "$mode" = "--raw" ]; then
+    sanitized_raw_json "$json" || die "couldn't sanitize Codex response"
+    return
+  fi
+  if [ "$mode" = "--raw-full" ]; then
+    echo "warning: --raw-full includes account-scoped reset-credit ids; keep this output local" >&2
     printf '%s\n' "$json" | jq . 2>/dev/null || printf '%s\n' "$json"
     return
   fi
@@ -392,8 +554,11 @@ main() {
     h7=$(humanize_until "$(reset_epoch "$win7d")")
   else na7=1; fi
 
+  extras=$(additional_limits_json "$json")
+  reset_summary=$(reset_credits_json "$json")
+
   if [ "$mode" = "--status" ]; then
-    status_json "available" "" "$((1 - na5))" "$((1 - na7))"
+    status_json "available" "" "$((1 - na5))" "$((1 - na7))" "$extras" "$reset_summary"
     return
   fi
 
@@ -416,6 +581,7 @@ main() {
   if [ "$mode" = "--print" ]; then
     if [ "$na5" = 1 ]; then echo "cx5h  n/a  · no 5h window"; else echo "cx5h  ${pct5}%  · resets ${h5}"; fi
     if [ "$na7" = 1 ]; then echo "cx7d  n/a  · no weekly window"; else echo "cx7d  ${pct7}%  · resets ${h7}"; fi
+    print_additional_limits "$extras" "$reset_summary"
     return
   fi
 
@@ -431,7 +597,7 @@ main() {
     return
   fi
 
-  die "unknown mode: $mode (use --print | --raw | --update | --buckets | --status)"
+  die "unknown mode: $mode (use --print | --raw | --raw-full | --update | --buckets | --status)"
 }
 
 main "$@"

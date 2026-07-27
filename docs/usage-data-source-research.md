@@ -24,15 +24,23 @@ FIFO keeps stdin open until the correlated response arrives, then the process ex
 new runtime dependency is required. Keep strict schema validation, duration-based routing, and
 explicit unknown/offline states. Never fall back to reading OAuth material or calling WHAM directly.
 
+`rateLimits` is the backward-compatible default projection and remains the only source for sidebar
+sentinels. `rateLimitsByLimitId` is optional and open-ended: it may repeat `codex` and add named
+model-specific limits. Those backend ids are opaque—not stable public identifiers—so diagnostics
+prefer `limitName`, fall back to a sanitized id only for display, and never create extra workspaces.
+Optional `rateLimitResetCredits` is also informational: report available count/status/title, but
+never consume a credit. Its credit ids are account-scoped, so normal `--raw` removes them;
+`--raw-full` is an explicitly account-private local debugging mode.
+
 This replaced the direct request after a live expired-token incident on Codex 0.145.0: direct WHAM
 and the app-server RPC both correctly returned 401, while `codex login status` still said ChatGPT
 was logged in. A normal model request exposed the actionable cause—its refresh token had already
 been used and re-login was required. The RPC cannot repair an invalidated refresh token, but it can
 perform normal refreshes and surfaces the same honest offline state without duplicating auth logic.
 
-Fixtures cover the JSONL handshake, interleaved notifications, RPC errors, classic, swapped,
-weekly-only, short-only, malformed duration/percentage, and expanded responses carrying unrelated
-credits/spend/additional limits.
+Fixtures cover the JSONL handshake, interleaved notifications, auth/network/timeout/crash failures,
+classic, swapped, weekly-only, short-only, malformed duration/percentage, sanitized raw output, and
+expanded responses carrying unrelated credits/spend/additional limits/reset credits.
 
 Authoritative source references in <https://github.com/openai/codex>:
 

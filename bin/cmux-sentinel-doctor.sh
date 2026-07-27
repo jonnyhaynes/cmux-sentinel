@@ -15,6 +15,14 @@ warn() { printf '  \033[33m⚠\033[0m %s\n' "$1"; warns=$((warns + 1)); }
 bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; fails=$((fails + 1)); }
 note() { printf '  \033[2m•\033[0m %s\n' "$1"; }   # neutral info, doesn't affect status
 have() { command -v "$1" >/dev/null 2>&1; }
+duration_label() { # $1=minutes
+  local mins="${1:-0}"
+  case "$mins" in ''|*[!0-9]*) printf '?' ;; *)
+    if [ "$mins" -ge 1440 ] && [ $((mins % 1440)) = 0 ]; then printf '%dd' "$((mins / 1440))"
+    elif [ "$mins" -ge 60 ] && [ $((mins % 60)) = 0 ]; then printf '%dh' "$((mins / 60))"
+    else printf '%dm' "$mins"; fi ;;
+  esac
+}
 check_launchd_job() { # $1=provider  $2=job label
   local provider="$1" job="$2"
   if launchctl list 2>/dev/null | grep -qF -- "$job"; then
@@ -171,7 +179,7 @@ case " $providers " in *" codex "*) codex_on=1 ;; *) codex_on=0 ;; esac
 if codex_installed; then codex_inst=1; else codex_inst=0; fi
 
 if [ "$codex_on" = 1 ] && [ "$codex_inst" = 1 ]; then
-  ok "codex: installed + enabled → meters active"
+  ok "codex: ChatGPT login stored + provider enabled"
   check_launchd_job "codex" "com.cmux-codex-usage"
 elif [ "$codex_on" = 1 ]; then
   warn "codex: enabled but NOT installed here — poller exits cleanly; any existing sentinels remain until closed"
@@ -203,8 +211,32 @@ if have cmux && have jq; then
       [ "$cx_status" = "available" ] && cx_live=$(printf '%s' "$cx_cap" | jq -r '.buckets[]?')
     fi
   fi
-  if [ "$codex_inst" = 1 ] && [ "$cx_status" = "unknown" ]; then
-    note "codex capability unknown (${cx_reason:-offline or schema changed}) — retaining the current sentinel layout"
+  if [ "$codex_on" = 1 ] && [ "$codex_inst" = 1 ]; then
+    if [ "$cx_status" = "available" ]; then
+      ok "codex: live allowance available → default meter data valid"
+      while IFS=$'\t' read -r extra_name extra_used extra_mins; do
+        [ -n "$extra_name" ] || continue
+        note "codex additional limit: $extra_name — ${extra_used}% used ($(duration_label "$extra_mins") window); informational only, no extra workspace"
+      done < <(printf '%s' "$cx_cap" | jq -r '
+        .additionalLimits[]? | select(.name != .id) | .name as $name | .windows[]?
+        | [$name, (.usedPercent | if . < 0 then 0 elif . > 100 then 100 else . end | round), .windowDurationMins]
+        | @tsv' 2>/dev/null)
+      reset_count=$(printf '%s' "$cx_cap" | jq -r '.resetCredits.availableCount // empty' 2>/dev/null)
+      case "$reset_count" in ''|*[!0-9]*) : ;;
+        0) note "codex usage resets: none available" ;;
+        1) note "codex usage resets: 1 available (read-only; redeem in Codex)" ;;
+        *) note "codex usage resets: $reset_count available (read-only; redeem in Codex)" ;;
+      esac
+      while IFS=$'\t' read -r reset_title reset_status; do
+        [ -n "$reset_title" ] || reset_title="unnamed reset"
+        [ -n "$reset_status" ] || reset_status="status unknown"
+        note "codex reset credit: $reset_title — $reset_status"
+      done < <(printf '%s' "$cx_cap" | jq -r \
+        '.resetCredits.credits[]? | [(.title // ""), (.status // "")] | @tsv' 2>/dev/null)
+    else
+      warn "codex: live allowance unavailable — ${cx_reason:-offline or schema changed}; stored login alone does not prove meters are active"
+      note "retaining the current Codex sentinel layout until capability is known"
+    fi
   fi
   for lbl in "$lblcx5" "$lblcx7"; do
     rw="$(resolve_ref "$lbl")"; IFS=$'\t' read -r ref ref_win <<<"$rw"

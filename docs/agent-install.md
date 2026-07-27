@@ -47,12 +47,17 @@ Choose integrations explicitly; do not infer one from another:
 | Claude states | `--with-bridge` / `WITH_BRIDGE=1` | Claude hook bridge + event registration |
 | Amp states | `--with-amp` / `WITH_AMP=1` | Amp plugin + neutral bridge dependency; no Claude hooks |
 | Zed | `--with-zed` / `WITH_ZED=1` | Zed helpers + Zed hook registration |
+| Loaded plist refresh | `--reload-agents` / `RELOAD_AGENTS=1` | Reload only changed, already-loaded launchd jobs |
 
 When Amp is requested, also run `cmux hooks amp install` for cmux's separate native-sidebar plugin.
 Do not edit its `cmux-session.ts`; cmux maintains that file.
 
 If the installer reports it could not edit `settings.json` automatically (no jq, or
 the file was not valid JSON), wire it yourself — see [Appendix: hooks block](#appendix--hooks-block).
+
+On an update, read the launchd messages too. launchd does not reread a changed loaded plist. A
+normal install prints exact non-disruptive `bootout` + `bootstrap` commands; re-running with
+`--reload-agents` performs only the necessary changed+loaded reloads. It never cycles unchanged jobs.
 
 ## Step 2 — create the usage sentinels
 
@@ -98,7 +103,9 @@ the file. It is JSONC (comments allowed), so edit it as text, not with jq.
 ## Step 4 — start enabled pollers (launchd)
 
 ```bash
-# Run the matching line for each enabled provider, unless that job is already loaded.
+# Run the matching line for each enabled provider unless that job is already loaded.
+# If an update changed a loaded plist, use the installer's printed reload commands
+# (or re-run install.sh --reload-agents); simply leaving it loaded keeps the old definition.
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-claude-usage.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-codex-usage.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-amp-usage.plist

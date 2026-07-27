@@ -5,8 +5,9 @@
 # RPC, not auth.json or old rollout files. This stubs the Codex JSONL protocol and
 # cmux, and runs in CI on Linux too. PATH is restricted (stubs first, no real
 # Codex/curl) with jq symlinked in. Asserts: disabled / not-logged-in / apikey-mode /
-# offline(⚠) / populated(bars) / no-windows(⚠) / clamping / duration routing /
-# notification interleaving / multi-window --window targeting.
+# actionable RPC failures / sanitized raw output / additional named limits /
+# populated bars / no-windows(⚠) / clamping / duration routing / notification
+# interleaving / multi-window --window targeting.
 #
 # Run:  make test   (or:  bash tests/codex-poller.sh)
 set -u
@@ -93,7 +94,13 @@ while IFS= read -r line; do
     1)
       # Prove the poller correlates by id rather than treating the next line as the response.
       printf '{"method":"remoteControl/status/changed","params":{"status":"disabled"}}\n'
-      if [ "${STUB_RPC:-fail}" != "ok" ]; then
+      if [ "${STUB_RPC:-fail}" = "expired" ]; then
+        printf '{"id":1,"error":{"code":-32603,"message":"GET usage failed: 401 Unauthorized: token_expired"}}\n'
+      elif [ "${STUB_RPC:-fail}" = "network" ]; then
+        printf '{"id":1,"error":{"code":-32603,"message":"error sending request: failed to connect"}}\n'
+      elif [ "${STUB_RPC:-fail}" = "hang" ]; then
+        : # keep stdin open but never answer id=1 → bounded timeout path
+      elif [ "${STUB_RPC:-fail}" != "ok" ]; then
         printf '{"id":1,"error":{"code":-32603,"message":"fake rate-limit failure"}}\n'
       elif [ -n "${STUB_NOWINDOWS:-}" ]; then
         printf '{"id":1,"result":{"rateLimits":{"planType":"pro","primary":null,"secondary":null},"rateLimitsByLimitId":null,"rateLimitResetCredits":null}}\n'
@@ -102,7 +109,7 @@ while IFS= read -r line; do
       elif [ -n "${STUB_SHORT_ONLY:-}" ]; then
         printf '{"id":1,"result":{"rateLimits":{"planType":"plus","primary":{"usedPercent":%s,"windowDurationMins":300,"resetsAt":1999999999},"secondary":null},"rateLimitsByLimitId":null,"rateLimitResetCredits":null}}\n' "${STUB_P5:-1}"
       elif [ -n "${STUB_EXPANDED:-}" ]; then
-        printf '{"id":1,"result":{"rateLimits":{"limitId":"codex","planType":"pro","primary":{"usedPercent":%s,"windowDurationMins":300,"resetsAt":1999999999},"secondary":{"usedPercent":%s,"windowDurationMins":10080,"resetsAt":2000999999},"credits":{"balance":"12"},"individualLimit":{"usedPercent":1}},"rateLimitsByLimitId":{"reviews":{"primary":{"usedPercent":88,"windowDurationMins":1440}}},"rateLimitResetCredits":{"availableCount":0,"credits":[]}}}\n' "${STUB_P5:-7}" "${STUB_P7:-3}"
+        printf '{"id":1,"result":{"rateLimits":{"limitId":"codex","planType":"pro","primary":{"usedPercent":%s,"windowDurationMins":300,"resetsAt":1999999999},"secondary":{"usedPercent":%s,"windowDurationMins":10080,"resetsAt":2000999999},"credits":{"balance":"12"},"individualLimit":{"usedPercent":1}},"rateLimitsByLimitId":{"codex":{"limitId":"codex","primary":{"usedPercent":%s,"windowDurationMins":300,"resetsAt":1999999999}},"codex_bengalfox":{"limitId":"codex_bengalfox","limitName":"GPT-5.3-Codex-Spark","primary":{"usedPercent":6,"windowDurationMins":10080,"resetsAt":2001999999}},"broken":{"limitId":"broken","primary":{"usedPercent":"bad","windowDurationMins":300}}},"rateLimitResetCredits":{"availableCount":1,"credits":[{"id":"RateLimitResetCredit_private","status":"available","title":"Full reset"}]}}}\n' "${STUB_P5:-7}" "${STUB_P7:-3}" "${STUB_P5:-7}"
       elif [ -n "${STUB_BAD_DURATION:-}" ]; then
         printf '{"id":1,"result":{"rateLimits":{"planType":"pro","primary":{"usedPercent":91,"windowDurationMins":null,"resetsAt":1999999999},"secondary":{"usedPercent":%s,"windowDurationMins":10080,"resetsAt":2000999999}},"rateLimitsByLimitId":null,"rateLimitResetCredits":null}}\n' "${STUB_P7:-1}"
       elif [ -n "${STUB_SWAP:-}" ]; then
@@ -173,10 +180,25 @@ ckprog "offline clears the native bar so the ⚠ title shows through" "CLEAR"
 out=$(STUB_RPC=fail USAGE_PROVIDERS="claude codex" bash "$POLLER" --status 2>/dev/null)
 ckjq "offline --status is unknown, not no-windows" "$out" '.status == "unknown" and .reason == "Codex rate-limit RPC failed"'
 
-echo "T3b: app server dies after initialize → offline + cleanup, never SIGPIPE exit 141"
+echo "T3a: known auth/network failures become actionable without leaking response bodies"
+out=$(STUB_RPC=expired USAGE_PROVIDERS="claude codex" bash "$POLLER" --status 2>/dev/null)
+ckjq "expired login has exact recovery" "$out" '.reason == "Codex login expired; run codex logout, then codex login"'
+out=$(STUB_RPC=network USAGE_PROVIDERS="claude codex" bash "$POLLER" --status 2>/dev/null)
+ckjq "network failure is distinct" "$out" '.reason == "Codex backend is unreachable; check the network and retry"'
+
+echo "T3b: app server dies after initialize → exact diagnosis, never SIGPIPE exit 141"
 reset; auth_chatgpt
-STUB_RPC=ok STUB_DIES_AFTER_INIT=1 USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "crashed app-server --update" "$?" 1
+STUB_RPC=ok STUB_DIES_AFTER_INIT=1 CODEX_RPC_READ_INTERVALS=2 \
+  USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "crashed app-server --update" "$?" 1
 ckhas "crashed app-server stamps ⚠" "⚠"
+out=$(STUB_RPC=ok STUB_DIES_AFTER_INIT=1 CODEX_RPC_READ_INTERVALS=2 \
+  USAGE_PROVIDERS="claude codex" bash "$POLLER" --status 2>/dev/null)
+ckjq "crashed app-server is explicit" "$out" '.reason == "Codex app server exited before returning rate limits"'
+
+echo "T3c: live app server that never answers → bounded timeout diagnosis"
+out=$(STUB_RPC=hang CODEX_RPC_READ_INTERVALS=2 \
+  USAGE_PROVIDERS="claude codex" bash "$POLLER" --status 2>/dev/null)
+ckjq "app-server timeout is explicit" "$out" '.reason == "Codex app server timed out while reading rate limits"'
 
 echo "T4: logged in + populated → exit 0, cx5h/cx7d bars + native progress"
 reset; auth_chatgpt
@@ -243,6 +265,25 @@ reset; auth_chatgpt
 STUB_RPC=ok STUB_EXPANDED=1 STUB_P5=18 STUB_P7=9 USAGE_PROVIDERS="claude codex" bash "$POLLER" --update; ckcode "expanded --update" "$?" 0
 ckhas "default short window survives expanded shape" "cx5h.*18%"
 ckhas "default weekly window survives expanded shape" "cx7d.*9%"
+out=$(STUB_RPC=ok STUB_EXPANDED=1 STUB_P5=18 STUB_P7=9 USAGE_PROVIDERS="claude codex" bash "$POLLER" --status 2>/dev/null)
+ckjq "status reports valid additional named limit + reset count" "$out" \
+  '.additionalLimits == [{"id":"codex_bengalfox","name":"GPT-5.3-Codex-Spark","windows":[{"kind":"primary","usedPercent":6,"windowDurationMins":10080,"resetsAt":2001999999}]}]
+   and .resetCredits == {"availableCount":1,"credits":[{"status":"available","resetType":null,"title":"Full reset","expiresAt":null}]}'
+out=$(STUB_RPC=ok STUB_EXPANDED=1 USAGE_PROVIDERS="claude codex" bash "$POLLER" --print 2>/dev/null)
+case "$out" in *"extra  GPT-5.3-Codex-Spark  6% · 7d window"*) pass=$((pass + 1)); printf '  ✓ --print shows named additional limit\n';;
+  *) fail=$((fail + 1)); printf '  ✗ --print omitted named limit:\n%s\n' "$out";; esac
+case "$out" in *"reset  1 usage reset available · Full reset · redeem in Codex"*) pass=$((pass + 1)); printf '  ✓ --print shows reset-credit count and title\n';;
+  *) fail=$((fail + 1)); printf '  ✗ --print omitted reset count:\n%s\n' "$out";; esac
+
+echo "T9d: --raw redacts account-scoped reset-credit ids; --raw-full is explicit"
+out=$(STUB_RPC=ok STUB_EXPANDED=1 USAGE_PROVIDERS="claude codex" bash "$POLLER" --raw 2>/dev/null)
+ckjq "sanitized raw keeps reset metadata but removes id" "$out" \
+  '.rateLimitResetCredits.availableCount == 1 and (.rateLimitResetCredits.credits[0] | has("id") | not)'
+fullerr="$ROOT/.raw-full.err"
+out=$(STUB_RPC=ok STUB_EXPANDED=1 USAGE_PROVIDERS="claude codex" bash "$POLLER" --raw-full 2>"$fullerr")
+ckjq "raw-full preserves the opaque id" "$out" '.rateLimitResetCredits.credits[0].id == "RateLimitResetCredit_private"'
+if grep -q 'account-scoped.*keep this output local' "$fullerr"; then pass=$((pass + 1)); printf '  ✓ raw-full warns before disclosure\n'
+else fail=$((fail + 1)); printf '  ✗ raw-full warning missing:\n%s\n' "$(cat "$fullerr")"; fi
 
 echo "T10: --buckets reports the windows the account HAS (drives sentinel creation)"
 # cmux-sentinel-setup.sh reads this to skip a sentinel for a window that doesn't
