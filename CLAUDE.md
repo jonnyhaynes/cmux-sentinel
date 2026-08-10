@@ -215,9 +215,9 @@ cmux sidebar validate workspaces && cmux sidebar reload   # synthetic interpreta
 make sidebar-live                     # mount repo sidebar against live data; human visual verdict
 
 # offline tests (stub cmux/security/curl/$HOME — run in CI too)
-make test   # bridge-state(36) poller-gate(38) codex-poller(83) install-hooks(43) sentinel-setup(52)
+make test   # bridge-state(36) poller-gate(38) codex-poller(83) install-hooks(52) sentinel-setup(52)
             # sentinel-doctor(35) group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(23)
-            # amp-bridge(43) amp-poller(49) = 464 assertions total
+            # amp-bridge(43) amp-poller(49) = 473 assertions total
 ```
 
 ## Architecture / where things live
@@ -383,6 +383,21 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   leaves unchanged jobs alone, and by default prints exact `bootout` + `bootstrap` commands for a
   changed+loaded job. `--reload-agents` / `RELOAD_AGENTS=1` explicitly performs only those targeted
   reloads. Do not cycle unchanged jobs or silently disrupt loaded agents on a plain install.
+- **Installer backups are content-aware and bounded — keep them that way.** Re-running `install.sh`
+  IS the documented update path (the curl bootstrap git-pulls and re-deploys *every* file), so the
+  old unconditional `cp "$1" "$1.bak.$(date +%s)"` wrote one dead file per run: 48 had accumulated
+  across the config dirs by 2026-08-10, which buries the one backup that actually matters. `bak()`
+  now takes the incoming source as `$2` and **skips entirely when the bytes match**, then prunes to
+  the newest `INSTALL_BAK_KEEP` (default 3). Every call site passes its source; only `$settings` and
+  the plist path use the 1-arg form (the plist already does its own `cmp` first). If you add a
+  deploy step, pass the source — otherwise you silently reintroduce the pile.
+  Same class of bug, worse, in `register_hooks`: its jq `ensure` is idempotent, so the old order
+  (back up → jq → `mv` → announce) rewrote `~/.claude/settings.json` **byte-identically on every
+  run** — a junk backup each time (11 had accumulated) plus a false "RESTART Claude Code to load new
+  hook events" instruction when nothing had been wired. It now renders to a temp file, `cmp`s, and
+  returns "already wired" without touching the file. **Render-then-compare before you write** is the
+  rule for every generated file here (the plist path always did it).
+  Covered by `tests/install-hooks.sh` T12 + T13.
 
 ## Conventions & security
 

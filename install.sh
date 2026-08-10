@@ -51,7 +51,30 @@ if [ -z "$here" ] || [ ! -f "$here/bin/cmux-claude-usage.sh" ]; then
 fi
 
 cfg="$HOME/.config/cmux"
-bak() { [ -e "$1" ] && cp "$1" "$1.bak.$(date +%s)" && echo "  backed up $1"; return 0; }
+# Back up a file we're about to overwrite. Two guards, both learned the hard way:
+# re-running the installer is the DOCUMENTED update path (the curl bootstrap
+# git-pulls and re-deploys every file), so an unconditional copy wrote one dead
+# file per run — 48 had piled up across the config dirs by 2026-08-10, which
+# buries the one backup that actually mattered.
+#   1. Skip entirely when the incoming bytes match: nothing would change, so there
+#      is nothing to preserve. Callers pass the source as $2; the plist path
+#      already does its own cmp and calls the 1-arg form.
+#   2. Keep only the newest $BAK_KEEP. Bounded history beats an unbounded pile.
+BAK_KEEP="${INSTALL_BAK_KEEP:-3}"
+bak() { # $1 = file about to be overwritten   [$2 = incoming source to compare]
+  [ -e "$1" ] || return 0
+  if [ -n "${2:-}" ] && cmp -s "$1" "$2"; then return 0; fi
+  cp "$1" "$1.bak.$(date +%s)" && echo "  backed up $1"
+  # Epoch suffixes are fixed-width for any date this century, so a reverse lexical
+  # sort is a reverse chronological one. An unmatched glob stays literal, hence -e.
+  local f n=0
+  while IFS= read -r f; do
+    [ -e "$f" ] || continue
+    n=$((n + 1))
+    [ "$n" -gt "$BAK_KEEP" ] && rm -f "$f"
+  done < <(printf '%s\n' "$1".bak.* | sort -r)
+  return 0
+}
 
 # Render one launchd template only when its contents changed. launchd does not
 # reread an already-loaded plist after a file replacement, so silently writing a
@@ -130,7 +153,10 @@ register_hooks() {
     echo "  ⚠ $settings isn't valid JSON — paste the hooks block from the README by hand"; return 0
   fi
   events_json="$(printf '%s\n' "$@" | jq -R . | jq -s .)"  # events → JSON array
-  bak "$settings"
+  # Render FIRST, then compare. `ensure` is idempotent, so on an already-wired
+  # settings.json the old order (back up → jq → mv → announce) rewrote the file
+  # byte-identically, dropped a junk backup, and told the user to RESTART Claude
+  # Code — every single run. Only touch the file when the render actually differs.
   tmp="$(mktemp)"
   if jq --arg cmd "$cmd" --arg marker "$marker" --argjson events "$events_json" '
       def ensure($ev):
@@ -140,6 +166,12 @@ register_hooks() {
       .hooks = (.hooks // {})
       | reduce ($events[]) as $ev (.; ensure($ev))
     ' "$settings" >"$tmp" && [ -s "$tmp" ]; then
+    if cmp -s "$tmp" "$settings"; then
+      rm -f "$tmp"
+      echo "  = $marker already wired into $settings"
+      return 0
+    fi
+    bak "$settings"     # 1-arg: we just proved it differs
     mv "$tmp" "$settings"
     echo "  -> wired $marker into $settings (RESTART Claude Code to load new hook events)"
   else
@@ -156,13 +188,13 @@ mkdir -p "$HOME/bin" "$cfg/sidebars" "$HOME/.claude/hooks" "$HOME/Library/Launch
 #    self-gate and are no-ops until you opt in via USAGE_PROVIDERS — see
 #    usage-sentinels.env), so an out-of-the-box install is Claude-only but each
 #    other provider is one env edit away.
-bak "$HOME/bin/cmux-claude-usage.sh"
+bak "$HOME/bin/cmux-claude-usage.sh" "$here/bin/cmux-claude-usage.sh"
 install -m 0755 "$here/bin/cmux-claude-usage.sh" "$HOME/bin/cmux-claude-usage.sh"
 echo "  -> ~/bin/cmux-claude-usage.sh"
-bak "$HOME/bin/cmux-codex-usage.sh"
+bak "$HOME/bin/cmux-codex-usage.sh" "$here/bin/cmux-codex-usage.sh"
 install -m 0755 "$here/bin/cmux-codex-usage.sh" "$HOME/bin/cmux-codex-usage.sh"
 echo "  -> ~/bin/cmux-codex-usage.sh  (opt-in: add 'codex' to USAGE_PROVIDERS)"
-bak "$HOME/bin/cmux-amp-usage.sh"
+bak "$HOME/bin/cmux-amp-usage.sh" "$here/bin/cmux-amp-usage.sh"
 install -m 0755 "$here/bin/cmux-amp-usage.sh" "$HOME/bin/cmux-amp-usage.sh"
 echo "  -> ~/bin/cmux-amp-usage.sh  (opt-in: add 'amp' to USAGE_PROVIDERS)"
 install -m 0755 "$here/bin/cmux-sentinel-doctor.sh" "$HOME/bin/cmux-sentinel-doctor.sh"
@@ -173,7 +205,7 @@ install -m 0755 "$here/bin/cmux-group-sync.sh" "$HOME/bin/cmux-group-sync.sh"
 echo "  -> ~/bin/cmux-group-sync.sh  (opt-in: show workspace-GROUP names in the sidebar; set GROUP_NAME_SYNC=1)"
 
 # 2. sidebar
-bak "$cfg/sidebars/workspaces.swift"
+bak "$cfg/sidebars/workspaces.swift" "$here/sidebars/workspaces.swift"
 install -m 0644 "$here/sidebars/workspaces.swift" "$cfg/sidebars/workspaces.swift"
 echo "  -> ~/.config/cmux/sidebars/workspaces.swift"
 
@@ -208,7 +240,7 @@ install_plist "$here/examples/com.cmux-group-sync.plist" "$gsplist" \
 #    requested or already registered: old Amp-only releases also put their shared
 #    dependency here, and a plain update must not silently opt those users into Claude.
 if [ "${WITH_BRIDGE:-0}" = "1" ] || [ -f "$HOME/.claude/hooks/cmux-bridge.sh" ]; then
-  bak "$HOME/.claude/hooks/cmux-bridge.sh"
+  bak "$HOME/.claude/hooks/cmux-bridge.sh" "$here/hooks/cmux-bridge.sh"
   install -m 0755 "$here/hooks/cmux-bridge.sh" "$HOME/.claude/hooks/cmux-bridge.sh"
   echo "  -> ~/.claude/hooks/cmux-bridge.sh"
   if [ "${WITH_BRIDGE:-0}" = "1" ] || grep -q 'cmux-bridge' "$HOME/.claude/settings.json" 2>/dev/null; then
@@ -230,7 +262,7 @@ fi
 #     `export ZED_SENTINEL=1` (the master gate) — see docs/zed-integration.md — so a
 #     default install never touches Zed and other users of the repo are unaffected.
 if [ "${WITH_ZED:-0}" = "1" ] || [ -f "$HOME/.claude/hooks/zed-bridge.sh" ]; then
-  bak "$HOME/.claude/hooks/zed-bridge.sh"
+  bak "$HOME/.claude/hooks/zed-bridge.sh" "$here/hooks/zed-bridge.sh"
   install -m 0755 "$here/hooks/zed-bridge.sh" "$HOME/.claude/hooks/zed-bridge.sh"
   echo "  -> ~/.claude/hooks/zed-bridge.sh"
   install -m 0755 "$here/bin/cmux-open-in-zed.sh" "$HOME/bin/cmux-open-in-zed.sh"
@@ -260,10 +292,10 @@ fi
 #     custom sidebar, which set-status provably cannot reach.
 if [ "${WITH_AMP:-0}" = "1" ] || [ -f "$HOME/.config/amp/plugins/cmux-sentinel-amp.ts" ]; then
   mkdir -p "$HOME/.config/amp/plugins" "$HOME/.config/cmux-sentinel"
-  bak "$HOME/.config/cmux-sentinel/cmux-bridge.sh"
+  bak "$HOME/.config/cmux-sentinel/cmux-bridge.sh" "$here/hooks/cmux-bridge.sh"
   install -m 0755 "$here/hooks/cmux-bridge.sh" "$HOME/.config/cmux-sentinel/cmux-bridge.sh"
   echo "  -> ~/.config/cmux-sentinel/cmux-bridge.sh  (shared dependency for Amp)"
-  bak "$HOME/.config/amp/plugins/cmux-sentinel-amp.ts"
+  bak "$HOME/.config/amp/plugins/cmux-sentinel-amp.ts" "$here/hooks/amp-bridge.ts"
   install -m 0644 "$here/hooks/amp-bridge.ts" "$HOME/.config/amp/plugins/cmux-sentinel-amp.ts"
   echo "  -> ~/.config/amp/plugins/cmux-sentinel-amp.ts"
   AMP_INSTALLED=1

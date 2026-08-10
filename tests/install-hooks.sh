@@ -240,5 +240,55 @@ if [ "$rc" = 0 ] && printf '%s' "$reload_out" | grep -q "may currently be unload
   ok "bootstrap failure continues installation with exact recovery guidance"
 else bad "bootstrap failure aborted or omitted recovery guidance"; fi
 
+echo "T12: backups are content-aware and bounded"
+# Re-running the installer IS the documented update path, so an unconditional
+# backup wrote one dead file per run. Those piles bury the one backup that
+# matters, so: no copy when nothing changes, and keep only INSTALL_BAK_KEEP.
+brg="$SBX/.claude/hooks/cmux-bridge.sh"
+nbak() { local c=0 f; for f in "$brg".bak.*; do [ -e "$f" ] && c=$((c + 1)); done; printf '%s' "$c"; }
+
+runinstall                       # converge: deployed bridge == repo bridge
+rm -f "$brg".bak.*
+runinstall
+if [ "$(nbak)" = 0 ]; then ok "unchanged re-run creates no backup"
+else bad "unchanged re-run still wrote $(nbak) backup(s)"; fi
+
+printf '\n# local edit\n' >> "$brg"      # a real difference must be preserved
+runinstall
+if [ "$(nbak)" = 1 ]; then ok "a changed file is backed up exactly once"
+else bad "changed file produced $(nbak) backups (expected 1)"; fi
+if grep -q "local edit" "$brg".bak.* 2>/dev/null; then ok "the backup holds the REPLACED content"
+else bad "backup did not capture the overwritten file"; fi
+
+for e in 1000000001 1000000002 1000000003 1000000004 1000000005; do
+  printf 'old\n' > "$brg.bak.$e"        # a pre-existing pile, oldest-first names
+done
+printf '\n# another edit\n' >> "$brg"
+( cd "$ROOT" && WITH_BRIDGE=1 HOME="$SBX" INSTALL_BAK_KEEP=2 bash "$INSTALL" ) >/dev/null 2>&1
+if [ "$(nbak)" -le 2 ]; then ok "history pruned to INSTALL_BAK_KEEP ($(nbak) kept)"
+else bad "prune left $(nbak) backups, expected <= 2"; fi
+if [ -e "$brg".bak.1000000001 ]; then bad "prune kept the OLDEST backup"
+else ok "prune drops oldest first"; fi
+
+echo "T13: an already-wired settings.json is not rewritten, backed up, or announced"
+# `ensure` is idempotent, so the old order (back up → jq → mv → announce) rewrote
+# settings.json byte-identically every run: a junk backup each time (11 had piled
+# up on the maintainer's box) plus a false "RESTART Claude Code" instruction.
+rm -f "$SETTINGS".bak.*
+before="$(cat "$SETTINGS")"
+out="$(cd "$ROOT" && WITH_BRIDGE=1 HOME="$SBX" bash "$INSTALL" 2>&1)"
+if [ "$(cat "$SETTINGS")" = "$before" ]; then ok "settings.json byte-identical after a no-op run"
+else bad "settings.json was rewritten with no change to make"; fi
+nset=0; for f in "$SETTINGS".bak.*; do [ -e "$f" ] && nset=$((nset + 1)); done
+if [ "$nset" = 0 ]; then ok "no settings.json backup for a no-op run"
+else bad "no-op run still wrote $nset settings.json backup(s)"; fi
+case "$out" in *"already wired"*) ok "reports 'already wired' instead of a restart prompt";;
+  *) bad "no-op run did not report the already-wired state";; esac
+# Scope this to the ACTION line ("-> wired … into …"). The NEXT STEPS block also
+# mentions restarting Claude Code, but as static prose explaining WITH_BRIDGE=1 —
+# that is not a claim about this run and must not fail the test.
+case "$out" in *"-> wired"*) bad "no-op run still claimed it wired the hooks";;
+  *) ok "no misleading 'wired … RESTART' action line on a no-op run";; esac
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
