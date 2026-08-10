@@ -160,10 +160,12 @@ func repoColor(_ w) -> String {
 }
 // ── usage meters (hidden sentinels) ───────────────────────────────
 // ONE predicate per provider, matched by the sentinel's TITLE LABEL (not a
-// workspace id). cmux 0.64.15 removed stable workspace UUIDs — the only handle
-// is a positional ref that rotates on every app restart, so an id hard-coded
-// here would go stale each restart and the meters would silently fall back into
-// the normal list. The poller keeps each sentinel's title starting with its
+// workspace id). 0.64.15 removed stable workspace UUIDs, leaving only a positional
+// ref that rotates on every app restart, so an id hard-coded here would go stale
+// each restart and the meters would silently fall back into the normal list.
+// 0.64.22 populates `w.id` again, but it is not a proven-durable handle (no public
+// `stableId`) and a hard-coded id would still need a reinstall to change — the
+// label needs neither. The poller keeps each sentinel's title starting with its
 // label ("5h "/"7d "), `.hasPrefix` works in the interpreter (proven), and the
 // bridge prefixes real agent workspaces with ⚡/⏳ (never a bare label), so the
 // label is a collision-free, restart-proof anchor both sides share.

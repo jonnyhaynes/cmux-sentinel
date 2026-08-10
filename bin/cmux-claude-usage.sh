@@ -20,11 +20,16 @@
 # sentinels from the normal list. `|` separates fallback detail from fallback bar.
 #
 # Identity: cmux 0.64.15 removed stable workspace UUIDs from the model and from
-# `workspace list --json` (id is null) — the only handle is a positional `ref`
+# `workspace list --json` (id came back null) — leaving only a positional `ref`
 # (workspace:N) that ROTATES across app restarts and reorders. So we can't store
 # a sentinel id (the old SENTINEL_5H/7D UUID scheme broke on every restart); we
 # re-resolve each sentinel's ref every run from its title label, the one stable
 # anchor the sidebar also keys on. See resolve_ref().
+#
+# 0.64.22 populates `id` again (upstream #8437) and it matches $CMUX_WORKSPACE_ID.
+# We deliberately still don't use it: populated is not the same as durable across a
+# restart, the explicitly durable `stableId` is still not exposed, and re-resolving
+# by title is restart-proof by construction — so an id buys nothing here. See CLAUDE.md.
 #
 # Modes:
 #   --print     fetch + print parsed values (verification; no cmux writes)

@@ -122,17 +122,20 @@ case " $PROVIDERS " in *" amp "*)
 # effect on what renders (the sidebar's meter panel sorts by title label, and the
 # workspace list filters meters out), so this reorders nothing the user can see.
 #
-# cmux maps ⌘1…⌘8 to indices 0…7 and ⌘9 to the LAST workspace (count-1) — indices
-# 8…count-2 are the "keyless band". Hence the invariant:
+# cmux maps ⌘1…⌘8 to numbered positions 0…7 and ⌘9 to the LAST numbered row
+# (count-1) — positions 8…count-2 are the "keyless band". Those positions are NOT
+# raw `.index`: since 0.64.22 group anchors and collapsed members are skipped
+# (see JQ_NUMBERED). Hence the invariant:
 #
-#   sentinels live in the keyless band, and the LAST workspace is a real one.
+#   sentinels live in the keyless band, and the LAST NUMBERED row is a real one.
 #
 # That puts 9/9 keys on real workspaces. Sentinels at the very bottom would cost
 # ⌘9; at the top they'd cost ⌘1…⌘4. Relative order of real workspaces is PRESERVED:
 # we only push meters down and then re-park the workspace that was already last.
 #
-# Refs are positional handles with no stable UUID behind them (0.64.15 removed
-# those), so re-resolve by TITLE before every move rather than caching a ref.
+# Refs are positional handles that a move renumbers, so re-resolve by TITLE before
+# every move rather than caching a ref. (0.64.22 populates `id` again, but it is not
+# a proven-durable handle — see CLAUDE.md — and the title anchor already works.)
 
 # Every label the sidebar hides — including disabled providers' leftovers, which
 # still exist as workspaces and still eat ⌘ keys. Array, not a string: a label is
@@ -148,6 +151,27 @@ ws_reorder() { # $1 = ref  $2 = index  $3 = window ("")
   if [ -n "${3:-}" ]; then cmux reorder-workspace --workspace "$1" --index "$2" --window "$3" >/dev/null 2>&1
   else cmux reorder-workspace --workspace "$1" --index "$2" >/dev/null 2>&1; fi
 }
+grp_json() { # $1 = window ("" = default)
+  if [ -n "${1:-}" ]; then cmux workspace-group list --window "$1" --json 2>/dev/null
+  else cmux workspace-group list --json 2>/dev/null; fi
+}
+
+# jq: the rows cmux actually NUMBERS for ⌘1…⌘9, in display order.
+#
+# cmux 0.64.22 (upstream #9176) stopped numbering the raw tab array: ⌘N now indexes
+# `SidebarWorkspaceRenderItem.numberedWorkspaceIds`, i.e. the ORDINARY sidebar rows.
+# Two kinds of workspace are therefore NOT numbered, and both shrink the list so
+# every row below them shifts one key UP:
+#   - a group's ANCHOR (it renders as the group header, not as a workspace row)
+#   - every member of a COLLAPSED group
+# Sentinels are plain ungrouped workspaces, so they are always numbered — but a
+# group above them silently moves them into the keyed band. Computing the band off
+# raw `.index` would then park them wrong and report a false all-clear.
+# shellcheck disable=SC2016  # jq program — $gs/$x/$r are jq vars, must NOT expand in bash
+JQ_NUMBERED='def numbered($gs):
+  ( [ $gs[]? | .anchor_workspace_ref // empty ]
+    + [ $gs[]? | select(.is_collapsed == true) | .member_workspace_refs[]? ] ) as $x
+  | [ .workspaces | sort_by(.index)[] | select( .ref as $r | ($x | index($r)) == null ) ];'
 
 # jq: does a title belong to a sentinel? Exact label ("5h", pre-first-poll) or
 # label + " " + bar ("5h ███ 41%") — the same match the sidebar and pollers use, so
@@ -170,7 +194,7 @@ sentinel_window() {
 }
 
 layout() {
-  local win json total ref lbl reals last_real
+  local win json total ref lbl reals last_real gj
   win=$(sentinel_window) || { echo "  = no sentinels to park"; return 0; }
 
   # Push every sentinel to the end, re-resolving its ref by title each time (a
@@ -190,14 +214,18 @@ layout() {
   # Needs 2+ real workspaces: with 0 there's nothing to anchor, and with 1 we'd be
   # pushing the user's only workspace below the meters to buy nothing.
   json=$(ws_json "$win"); [ -n "$json" ] || return 0
-  reals=$(printf '%s' "$json" | jq -r --argjson ls "$(labels_json)" \
-    "$JQ_IS_SENT"' [.workspaces[] | select(.title | is_sent($ls) | not)] | length' 2>/dev/null)
+  # Only a NUMBERED real workspace can answer ⌘9. Parking a group anchor last would
+  # render it as a group header — dropping it out of the numbering and handing ⌘9
+  # straight back to a meter, the exact bug this pass exists to prevent.
+  gj=$(grp_json "$win" | jq -c '.groups // []' 2>/dev/null); [ -n "$gj" ] || gj='[]'
+  reals=$(printf '%s' "$json" | jq -r --argjson ls "$(labels_json)" --argjson gs "$gj" \
+    "$JQ_IS_SENT$JQ_NUMBERED"' [numbered($gs)[] | select(.title | is_sent($ls) | not)] | length' 2>/dev/null)
   if [ "${reals:-0}" -lt 2 ]; then
     echo "  = too few workspaces to anchor ⌘9 — meters still take some keys"
     return 0
   fi
-  last_real=$(printf '%s' "$json" | jq -r --argjson ls "$(labels_json)" \
-    "$JQ_IS_SENT"' [.workspaces[] | select(.title | is_sent($ls) | not)] | sort_by(.index) | last | .ref' 2>/dev/null)
+  last_real=$(printf '%s' "$json" | jq -r --argjson ls "$(labels_json)" --argjson gs "$gj" \
+    "$JQ_IS_SENT$JQ_NUMBERED"' [numbered($gs)[] | select(.title | is_sent($ls) | not)] | last | .ref' 2>/dev/null)
   total=$(printf '%s' "$json" | jq -r '.workspaces | length' 2>/dev/null)
   [ -n "$last_real" ] && [ "${total:-0}" -gt 1 ] || return 0
   ws_reorder "$last_real" "$((total - 1))" "$win" && echo "  ✓ ⌘9 anchored on your last workspace"

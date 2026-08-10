@@ -52,6 +52,7 @@ reorder() { # $1 = ref, $2 = final index — drop the element, re-insert at $2, 
 case "$1" in
   ping) exit 0 ;;
   list-windows) printf '[{"id":"win-a"}]\n'; exit 0 ;;
+  workspace-group) printf '%s\n' "${STUB_GROUPS:-{\"groups\":[]\}}"; exit 0 ;;
   reorder-workspace)
     shift; ref=""; idx=""
     while [ $# -gt 0 ]; do
@@ -248,6 +249,23 @@ ck "single real workspace stays at index 0 (keeps ⌘1)" [ "$(jq -r '.workspaces
 reset
 out=$(USAGE_PROVIDERS="claude codex" bash "$SETUP" 2>&1)   # no workspaces at all
 ckhas "empty list → nothing to park" "$out" "no sentinels to park"
+
+echo "T9: ⌘9 is anchored on a row cmux actually NUMBERS, never a group anchor"
+# Since 0.64.22 (#9176) a group's anchor renders as the group HEADER and is left
+# out of the ⌘1…⌘9 numbering. Parking it last therefore hands ⌘9 to whatever is
+# numbered last — a meter — which is precisely the key this pass exists to save.
+# seed order: one, two, 5h, grp-anchor(w4). Picking the last non-meter by raw
+# index selects the anchor; the numbered choice is "two".
+reset
+seed one two "5h ███ 41%" grp-anchor
+STUB_GROUPS='{"groups":[{"name":"G","anchor_workspace_ref":"w4","is_collapsed":false,"member_workspace_refs":["w4"]}]}' \
+  USAGE_PROVIDERS="claude" bash "$SETUP" >/dev/null 2>&1
+last=$(jq -r '.workspaces[-1].title' "$WSLIST")
+case "$last" in grp-anchor) bad "⌘9 parked on the group anchor — it renders as a header, so a meter takes ⌘9" ;;
+  5h*|7d*) bad "⌘9 landed on a meter ($last)" ;;
+  *) ok "⌘9 anchored on a numbered real workspace ($last)" ;; esac
+# The anchor must still be present — this pass reorders, it never drops a row.
+ck "group anchor is still in the list" [ "$(jq -r '[.workspaces[].title | select(. == "grp-anchor")] | length' "$WSLIST")" = 1 ]
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

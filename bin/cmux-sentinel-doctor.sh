@@ -346,9 +346,12 @@ if have cmux && have jq; then
 fi
 
 # ── ⌘N shortcut layout ────────────────────────────────────────────────────────
-# Mirrors cmux's WorkspaceShortcutMapper (Sources/App/TerminalDirectoryOpenSupport.swift;
-# re-verified unchanged on 0.64.19): ⌘1…⌘8 select indices 0…7, and ⌘9 ALWAYS selects
-# the LAST workspace (count-1) — so indices 8…count-2 are the "keyless band".
+# Mirrors cmux's WorkspaceShortcutMapper: ⌘1…⌘8 select positions 0…7, and ⌘9 ALWAYS
+# selects the LAST row (count-1) — so positions 8…count-2 are the "keyless band".
+# That digit math is unchanged (re-verified on 0.64.22 against upstream's own
+# WorkspaceShortcutMapperTests), but the SET being numbered changed in 0.64.22:
+# TabManager.selectWorkspaceByNumber now indexes the ordinary rendered rows, not the
+# raw tab array. See JQ_NUMBERED below.
 #
 # A sentinel is an ordinary workspace to cmux ("sentinel" only exists in our sidebar's
 # predicates), so a meter on a keyed index silently EATS that ⌘ key.
@@ -361,20 +364,37 @@ fi
 echo "• ⌘N shortcut layout"
 if have cmux && have jq; then
   lay_labels="$(printf '%s\n' "$lbl5" "$lbl7" "$lblcx5" "$lblcx7" "$lblampu" "$lblampo" | jq -R . | jq -s .)"
+  # The rows cmux actually numbers for ⌘1…⌘9 — kept identical to the copy in
+  # bin/cmux-sentinel-setup.sh (setup parks by it, the doctor reports drift off it).
+  # Since 0.64.22 (#9176) ⌘N indexes the ORDINARY sidebar rows, so a group ANCHOR
+  # (drawn as the group header) and every member of a COLLAPSED group are skipped,
+  # shifting each row below them one key up.
+  # shellcheck disable=SC2016  # jq program — $gs/$x/$r are jq vars, must NOT expand in bash
+  JQ_NUMBERED='def numbered($gs):
+    ( [ $gs[]? | .anchor_workspace_ref // empty ]
+      + [ $gs[]? | select(.is_collapsed == true) | .member_workspace_refs[]? ] ) as $x
+    | [ .workspaces | sort_by(.index)[] | select( .ref as $r | ($x | index($r)) == null ) ];'
   check_layout() { # $1 = window id; empty means default-window fallback
-    local win="$1" ctx="" lay eaten n_ws n_meters first_meter slack
+    local win="$1" ctx="" lay grp eaten n_ws n_meters first_meter slack
     if [ -n "$win" ]; then
       lay="$(cmux workspace list --window "$win" --json 2>/dev/null)"; ctx=" in window $win"
+      grp="$(cmux workspace-group list --window "$win" --json 2>/dev/null)"
     else
       lay="$(cmux workspace list --json 2>/dev/null)"
+      grp="$(cmux workspace-group list --json 2>/dev/null)"
     fi
-    # Digits eaten by a meter, computed straight off .index — never off the ref,
-    # which is an insertion-order handle and does NOT equal display position.
-    eaten="$(printf '%s' "$lay" | jq -r --argjson ls "$lay_labels" '
-        (.workspaces | length) as $n
-        | [ .workspaces[]
-            | select(.title as $t | $ls | any(. as $l | $t == $l or ($t | startswith($l + " "))))
-            | .index
+    grp="$(printf '%s' "$grp" | jq -c '.groups // []' 2>/dev/null)"; [ -n "$grp" ] || grp='[]'
+    # Digits eaten by a meter, computed off the NUMBERED position — not raw .index
+    # (0.64.22/#9176 skips group anchors and collapsed members, so a group above a
+    # meter shifts it a key up) and never off the ref, which is an insertion-order
+    # handle that does NOT equal display position. A meter that is itself unnumbered
+    # eats nothing, which falls out of the filter for free.
+    eaten="$(printf '%s' "$lay" | jq -r --argjson ls "$lay_labels" --argjson gs "$grp" "$JQ_NUMBERED"'
+        (numbered($gs)) as $rows
+        | ($rows | length) as $n
+        | [ $rows | to_entries[]
+            | select(.value.title as $t | $ls | any(. as $l | $t == $l or ($t | startswith($l + " "))))
+            | .key
             | if . == $n - 1 then "⌘9" elif . <= 7 then "⌘\(. + 1)" else empty end ]
         | unique | join(", ")' 2>/dev/null)"
     n_ws="$(printf '%s' "$lay" | jq -r '.workspaces | length' 2>/dev/null)"
@@ -389,12 +409,24 @@ if have cmux && have jq; then
       warn "meters$ctx are eating $eaten — re-park them: $HERE/cmux-sentinel-setup.sh"
     else
       # A meter needs 8 reals above it to clear ⌘1…⌘8. Closing rows consumes
-      # the difference between the first meter index and 8.
-      first_meter="$(printf '%s' "$lay" | jq -r --argjson ls "$lay_labels" '
-          [ .workspaces[] | select(.title as $t | $ls | any(. as $l | $t == $l or ($t | startswith($l + " ")))) | .index ] | min' 2>/dev/null)"
-      slack=$(( first_meter - 8 ))
+      # the difference between the first meter's numbered position and 8.
+      # Collapsing a group above the meters spends that headroom just as fast as
+      # closing workspaces does, since a collapsed group contributes only its
+      # (unnumbered) header.
+      first_meter="$(printf '%s' "$lay" | jq -r --argjson ls "$lay_labels" --argjson gs "$grp" "$JQ_NUMBERED"'
+          [ numbered($gs) | to_entries[]
+            | select(.value.title as $t | $ls | any(. as $l | $t == $l or ($t | startswith($l + " "))))
+            | .key ] | min' 2>/dev/null)"
       ok "all 9 ⌘ keys$ctx are on real workspaces (meters parked in the keyless band)"
-      if [ "$slack" -le 1 ]; then
+      # jq's `min` over an empty array is null: every meter is UNNUMBERED (dragged into
+      # a group, or into a collapsed one). That's a genuine all-clear — the meters cost
+      # no key at all — but there is no position to measure headroom from, and
+      # $(( null - 8 )) would quietly read as 0 and print a negative countdown.
+      case "${first_meter:-null}" in
+        ''|null) slack="" ;;
+        *) slack=$(( first_meter - 8 )) ;;
+      esac
+      if [ -n "$slack" ] && [ "$slack" -le 1 ]; then
         note "headroom$ctx is thin — closing $((slack + 1)) more workspace(s) above the meters will eat ⌘8; re-run cmux-sentinel-setup.sh after a cleanup"
       fi
     fi

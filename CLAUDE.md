@@ -19,7 +19,11 @@ and cleans it up; it deliberately does not claim a pixel pass. See
   (proven by probe: `hasPrefix=Y contains=Y hasSuffix=Y`; the live sidebar detects the working/
   compacting title markers via `.hasPrefix` and strips them with `.split`). An earlier note here
   claimed they render blank — that was WRONG on this build. `==` works too; use whichever is clearest.
-- **Avoid `||`** (unproven). Use an `if`-chain returning early. `&&` is fine and short-circuits.
+- **`||` is now DOCUMENTED as supported** — upstream `docs/custom-sidebars.md` lists `&& || !` as
+  short-circuiting (re-read 2026-08-10). The old "avoid, unproven" note predates that. It is still
+  unproven *on this build by render probe*, and the sidebar has no `||` in it today, so there's
+  nothing to fix — just don't treat an `if`-chain as mandatory any more. If you do introduce one,
+  probe it (blank-render is the failure mode, and `validate` won't catch it). `&&` is fine.
 - **`progress`, `description` AND `color` all DO reach the sidebar — all three are null-until-set.**
   Earlier
   probes concluded "`progress` never reaches" but every one checked an IDLE sentinel on which
@@ -63,7 +67,29 @@ and cleans it up; it deliberately does not claim a pixel pass. See
   `latestAt`, `remote`. **Consequence: a cmux-native agent integration can never light up this
   sidebar — per-agent title-marker bridges stay mandatory.** (`latestMessage`/`latestPrompt`/
   `latestAt` are bindable and currently unused here.) Upstream issue
-  `manaflow-ai/cmux#9001` tracks unifying this projection with the snapshot's missing `progress`.
+  `manaflow-ai/cmux#9001` tracks unifying this projection with the snapshot's missing `progress`
+  (still OPEN, no maintainer response as of 2026-08-10; so is #9002 for a render diagnostic).
+  Re-read on 0.64.22: the binding list above is **UNCHANGED** — nothing gained, nothing lost.
+- **cmux SHIPPED a native workspace "status lane" concept in 0.64.22 — usable by hand, invisible to
+  us.** `markWorkspaceDone` (⌘;) and `cycleWorkspaceStatus` (⌘⇧;, "cycle the workspace status one
+  lane forward") are present at the **v0.64.22 tag** (verified by fetching
+  `web/data/cmux-shortcuts.ts` at the tag), alongside 0.64.21's "Restore todo/completion-status
+  parity in the AppKit sidebar" (#8552) and "Tell coding agents workspace todos are user-owned"
+  (#8566). It has **no programmatic surface at all**: `cmux workspace-action --action mark-done` →
+  `Unknown workspace action` (the action list has no status/done/lane entry), no RPC method matches
+  `todo|lane|complet|done`, the `extension.sidebar.snapshot` key set has no lane field, and the
+  sidebar binding contract has none either. So: **Oliver can use it manually; the sidebar cannot read
+  it and no poller can write it.** Nothing to integrate. Flagged because it is the first upstream
+  feature that genuinely OVERLAPS our title-marker agent state (⚡/⏳/❓) — if a lane ever becomes
+  readable, revisit whether the markers should defer to it rather than compete. Also note "workspace
+  todos are USER-owned" is now an explicit upstream stance, so don't have an agent drive lanes even
+  if a write API appears.
+- **TRAP: `cmux shortcuts` prints only `OK`** — it opens the Settings UI, it does not list anything.
+  Grepping its output to test whether a shortcut exists returns nothing and looks like proof of
+  absence; it is proof of nothing. (This exact mistake produced a wrong "not released yet" note here
+  on 2026-08-10.) To check a keybinding, fetch `web/data/cmux-shortcuts.ts` **at the installed
+  version's tag** — `main` runs ahead of the release. Same shape as the `progress`/`description`
+  lesson above: an empty read is never evidence.
 - **Sentinel resolution is multi-window + title-anchored.** `cmux workspace list` is window-scoped and
   launchd has no window context, so the pollers' `resolve_ref` tries the default window then scans
   `list-windows`, returning `ref⇥window` and renaming with `--window` (unambiguous positional ref).
@@ -72,21 +98,27 @@ and cleans it up; it deliberately does not claim a pixel pass. See
   clobber a title prefix.
 - **`cmux sidebar-state` DIVERGES from what the sidebar sees** (it reads the canonical store). Never
   use it to predict the sidebar — verify with an in-sidebar `Text(...)` probe.
-- **Installed cmux 0.64.20 has no usable stable workspace UUID.** `cmux workspace list --json` returns
-  `id: null`; the only handle is a positional `ref` (`workspace:N`) that **rotates across app
-  restarts and reorders**. The old scheme stored sentinel UUIDs in the env file and the sidebar —
-  that broke on the first restart (silent "offline" meters in the normal list). Both sides now anchor
-  on the **title label** instead: the poller `resolve_ref()`s each sentinel by the workspace whose
-  title starts with the `5h`/`7d` label (plus a space) and renames by the live ref; the sidebar's
-  `isClaudeMeter()` matches the same prefix. This is restart-proof because it re-resolves every run —
-  the same reason the bridge
-  reads a LIVE `$CMUX_WORKSPACE_ID` (still a UUID, set per-shell) instead of storing one. Don't
-  reintroduce a stored id. The committed and deployed sidebars are now byte-identical (no id
-  substitution at install). **Upstream `main` changed after this release:** PR #8695 now normally
-  preserves runtime `Workspace.id` through session restore, but it can still be reminted on
-  collision/exclusion and the explicitly durable `Workspace.stableId` is not exposed by workspace
-  JSON, the snapshot RPC, or `w.id`. Keep the title anchor until a released durable public contract
-  is re-probed. See `.claude/research/2026-07-27-cmux-upstream-sidebar-gaps.md`.
+- **Sentinel identity stays TITLE-anchored — even though `workspace list --json` now has real ids
+  again.** History: 0.64.15 removed stable workspace UUIDs and `id` came back `null`, leaving only a
+  positional `ref` (`workspace:N`) that **rotates across app restarts and reorders**. The original
+  scheme stored sentinel UUIDs in the env file and the sidebar; that broke on the first restart
+  (silent "offline" meters in the normal list). Both sides therefore anchor on the **title label**:
+  the poller `resolve_ref()`s each sentinel by the workspace whose title starts with the `5h`/`7d`
+  label (plus a space) and renames by the live ref; the sidebar's `isClaudeMeter()` matches the same
+  prefix. That is restart-proof BY CONSTRUCTION — it re-resolves every run — which is the same
+  reason the bridge reads a LIVE `$CMUX_WORKSPACE_ID` instead of storing one.
+  **Re-probed 2026-08-10 on 0.64.22: `id` is populated again** (PR #8437, "Fix stable IDs in mirror
+  workspace CLI output") and it equals the shell's `$CMUX_WORKSPACE_ID` for the same workspace —
+  verified by matching `workspace:3`'s `id` against the env var. 0.64.21 also shipped "Preserve
+  workspace IDs across session restore" (#8695), so ids very likely DO now survive a normal restart.
+  **This still does NOT justify switching back.** Preserved-normally ≠ durable: #8695 can still
+  remint on collision/exclusion, and the explicitly durable
+  `Workspace.stableId` is STILL absent from workspace JSON (key not present), the snapshot RPC, and
+  `w.id`. Nothing about a title anchor gets cheaper if ids work, and it costs nothing today. Before
+  anyone reopens this: the missing evidence is a restart probe — record every `id`, quit and reopen
+  cmux, diff — plus a public `stableId`. Don't reintroduce a stored id on anything less. The
+  committed and deployed sidebars stay byte-identical (no id substitution at install).
+  See `.claude/research/2026-08-10-cmux-0.64.22-vacation-catchup.md`.
 - **Meters use a native value bar now.** `ProgressView(value:)` needs a numeric `progress`; the
   poller supplies it via `set-progress` (see the progress bullet above), so a meter row renders a
   native `ProgressView` tinted from the value (red ≥90%, amber ≥70%, else blue) with
@@ -110,29 +142,43 @@ and cleans it up; it deliberately does not claim a pixel pass. See
   `.keyboardShortcut`). cmux's NATIVE sidebar does draw ⌘-hold digit badges
   (`modifierKeyMonitor.isModifierPressed`), but that's internal to it. Even given a binding, the
   ~1s re-eval would lag a held key. Needs an upstream feature — don't try to fake it.
-- **The ⌘N gutter digit keys on `w.index`, mirroring cmux's `WorkspaceShortcutMapper`.** Two traps a
-  naive 1..N counter gets wrong: **⌘9 is NOT the 9th** — it always selects the LAST workspace
-  (`count-1`), so indices 8…count-2 have no key at all; and the digit indexes cmux's FULL tab list,
-  which **includes the sentinels** (cmux has no "sentinel" concept — that's only this file's
-  predicates). So the meters really do eat ⌘ slots and the visible rows show honest gaps
-  (verified 2026-07-15 by a real ⌘1…⌘9 sweep: ⌘6→`cx7d`, ⌘7→`cx5h`, ⌘9→`7d`). There's no way to
-  make a sentinel weightless — `TabManager.tabs` is the raw array, no hidden/archived concept — so
-  the fix is ORDER, which is free because sentinel index doesn't affect what renders (the meter
+- **The ⌘N gutter digit keys on a NUMBERED POSITION, not on `w.index`** — mirroring cmux's
+  `WorkspaceShortcutMapper` plus `SidebarWorkspaceRenderItem.numberedWorkspaceIds`. Three traps a
+  naive 1..N counter gets wrong. **(1) ⌘9 is NOT the 9th** — it always selects the LAST row
+  (`count-1`), so positions 8…count-2 have no key at all. **(2) The digits count the sentinels**
+  (cmux has no "sentinel" concept — that's only this file's predicates), so the meters really do eat
+  ⌘ slots and the visible rows show honest gaps (verified 2026-07-15 by a real ⌘1…⌘9 sweep:
+  ⌘6→`cx7d`, ⌘7→`cx5h`, ⌘9→`7d`). **(3) Since 0.64.22 the digits do NOT count every workspace.**
+  Upstream #9176 ("Fix workspace group anchor numbering", in `main` 2026-07-30, shipped in 0.64.22)
+  changed `TabManager.selectWorkspaceByNumber` to index the ORDINARY RENDERED ROWS instead of the raw
+  `TabManager.tabs` array. Excluded, and each exclusion pulls every row below it one key UP:
+  a group's **ANCHOR** (it renders as the group header, not a workspace row) and every member of a
+  **COLLAPSED** group. Sentinels are plain ungrouped workspaces so they're always numbered — but a
+  group above them silently shifts them into the keyed band. **The digit math itself is unchanged**
+  (re-verified 2026-08-10 against upstream's own `WorkspaceShortcutMapperTests`: ⌘9→`count-1`,
+  index 8 of 12 → no digit); only the set being numbered moved.
+  There's still no way to make a sentinel weightless — no hidden/archived concept — so
+  the fix is ORDER, which is free because sentinel position doesn't affect what renders (the meter
   panel sorts by label; the list filters meters out). **Layout invariant: sentinels live in the
-  keyless band (indices 8…count-2) and the LAST workspace is a real one** — that's 9/9 keys on real
-  workspaces. Sentinels at the very bottom costs ⌘9; at the top costs ⌘1–⌘4. Enforced by the layout
-  pass in `bin/cmux-sentinel-setup.sh` (re-run it anytime; `--no-layout` / `SENTINEL_LAYOUT=0` opts
-  out). It only pushes meters down and re-parks the workspace that was ALREADY last, so relative
-  order of real workspaces is preserved and nothing visible moves. Deliberately NOT in the pollers —
-  re-asserting order every 5min would fight manual drag-reordering.
+  keyless band (numbered positions 8…count-2) and the LAST NUMBERED row is a real one** — that's 9/9
+  keys on real workspaces. Sentinels at the very bottom costs ⌘9; at the top costs ⌘1–⌘4. Enforced by
+  the layout pass in `bin/cmux-sentinel-setup.sh` (re-run it anytime; `--no-layout` /
+  `SENTINEL_LAYOUT=0` opts out). It only pushes meters down and re-parks a workspace that is already
+  near the end, so relative order of real workspaces is preserved and nothing visible moves.
+  **It must never park a group ANCHOR last** — an anchor renders as a header, drops out of the
+  numbering, and hands ⌘9 straight back to a meter; `layout()` picks the last *numbered* real via
+  `JQ_NUMBERED` for exactly that reason (regression-tested in `tests/sentinel-setup.sh` T9).
+  Deliberately NOT in the pollers — re-asserting order every 5min would fight manual drag-reordering.
   **That pass is one-shot, so the invariant DECAYS: closing a workspace above a meter shifts the
   meter up, and once fewer than 8 reals sit above it, it eats ⌘8** — silently, since the only symptom
-  is a ⌘ key doing something odd. So `bin/cmux-sentinel-doctor.sh` reports which digits (if any) the
+  is a ⌘ key doing something odd. **Collapsing a group above the meters now spends that headroom the
+  same way a close does.** So `bin/cmux-sentinel-doctor.sh` reports which digits (if any) the
   meters are eating and warns when headroom is down to one close; the fix is always "re-run setup".
-  Read-only, for the same reason it's not in the pollers. The mapper was re-verified UNCHANGED on
-  0.64.19 (0.64.18's "Fix workspace number shortcut rebinding" touched settings rebinding, not the
-  index math) — the source is fetchable, `cmux docs shortcuts` names the raw URLs.
-  See `.claude/research/2026-07-15-workspace-shortcut-digits.md` and
+  Read-only, for the same reason it's not in the pollers. Both scripts keep an identical copy of the
+  `JQ_NUMBERED` jq helper (setup parks by it, doctor reports drift off it) — change them together.
+  The source is fetchable; `cmux docs shortcuts` names the raw URLs.
+  See `.claude/research/2026-08-10-cmux-0.64.22-vacation-catchup.md`,
+  `.claude/research/2026-07-15-workspace-shortcut-digits.md` and
   `.claude/research/2026-07-16-cmux-0.64.19-pre-restart-check.md`.
 - **Greedy modifiers that wreck row height:** `Divider().background("#hex")`,
   `.frame(maxHeight: .infinity)`, `.overlay { Rectangle().frame(height:1) }`. Use plain `Divider()` +
@@ -169,9 +215,9 @@ cmux sidebar validate workspaces && cmux sidebar reload   # synthetic interpreta
 make sidebar-live                     # mount repo sidebar against live data; human visual verdict
 
 # offline tests (stub cmux/security/curl/$HOME — run in CI too)
-make test   # bridge-state(36) poller-gate(38) codex-poller(83) install-hooks(43) sentinel-setup(50)
-            # sentinel-doctor(31) group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(23)
-            # amp-bridge(43) amp-poller(49) = 458 assertions total
+make test   # bridge-state(36) poller-gate(38) codex-poller(83) install-hooks(43) sentinel-setup(52)
+            # sentinel-doctor(35) group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(23)
+            # amp-bridge(43) amp-poller(49) = 464 assertions total
 ```
 
 ## Architecture / where things live
@@ -181,8 +227,9 @@ sidebars/workspaces.swift  the sidebar. isClaudeMeter()/isCodexMeter()/isAmpMete
 bin/cmux-claude-usage.sh    Claude usage poller. make_bar / sev_dot / mark_offline / bucket_field / to_pct / resolve_ref(+_paint, multi-window).
 bin/cmux-codex-usage.sh     Codex usage poller (short-lived account/rateLimits/read app-server RPC; Codex owns auth/refresh). Default meter + read-only named limits/reset credits; sanitized --raw / local-only --raw-full; actionable RPC failure classes; --buckets drives setup.
 bin/cmux-amp-usage.sh       Amp usage poller (scrapes `amp usage` PROSE — no --json). Monthly allowance, not windows. REMAINING→USED inversion. ampu (agent) + ampo (orb, opt-in AMP_ORB_METER=1).
-bin/cmux-sentinel-setup.sh  idempotent sentinel creation (per USAGE_PROVIDERS; known-live buckets only, fail-open on unknown) + auto-naming guard probe + ⌘N shortcut layout (layout/sentinel_window, --no-layout).
-bin/cmux-sentinel-doctor.sh READ-ONLY wiring report: cmux/sidebar/bridge/auto-refresh, installed × enabled × live capability × sentinel × freshness per provider, informational Codex limits/reset credits, ⌘N layout drift, snapshot data.
+bin/cmux-sentinel-setup.sh  idempotent sentinel creation (per USAGE_PROVIDERS; known-live buckets only, fail-open on unknown) + auto-naming guard probe + ⌘N shortcut layout (layout/sentinel_window/JQ_NUMBERED, --no-layout).
+bin/cmux-sentinel-doctor.sh READ-ONLY wiring report: cmux/sidebar/bridge/auto-refresh, installed × enabled × live capability × sentinel × freshness per provider, informational Codex limits/reset credits, ⌘N layout drift (JQ_NUMBERED), snapshot data.
+                            JQ_NUMBERED is duplicated verbatim in both files — cmux numbers ⌘1…⌘9 over the ORDINARY sidebar rows (group anchors + collapsed members excluded), so change them together.
 bin/cmux-sidebar-live-smoke.sh  stage + validate + mount the repo sidebar against live data, wait for a human verdict, then close/clean up; not a pixel assertion.
 bin/cmux-group-sync.sh      workspace-GROUP name → anchor-title sync (opt-in GROUP_NAME_SYNC). split-marker / multi-window / --list|--raw|--update.
 hooks/cmux-bridge.sh        Claude Code → cmux agent-state bridge (⚡ working / ⏳ compacting / ❓ waiting-on-you rows). AGENT-AGNOSTIC: CMUX_SENTINEL_SESSION_PID / _AGENT_LABEL / _LOG_SOURCE let any agent's adapter reuse it.

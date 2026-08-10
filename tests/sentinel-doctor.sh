@@ -66,7 +66,7 @@ case "$1" in
       case " $* " in *" --window win-b "*) window_list ;; *) printf '{"workspaces":[{"ref":"d1","index":0,"title":"default-real"}]}\n' ;; esac
     fi
     ;;
-  workspace-group) printf '{"groups":[]}\n' ;;
+  workspace-group) printf '%s\n' "${STUB_GROUPS:-{\"groups\":[]\}}" ;;
   rpc)
     if [ "$2" = extension.sidebar.snapshot ]; then window_list
     else echo "Error: disabled: Workspace auto-naming is disabled in Settings" >&2; exit 1; fi
@@ -194,6 +194,31 @@ case "$out4" in *"codex data stale (last successful update 15m ago; expected wit
   *) bad "stale Codex data was not reported";; esac
 case "$out4" in *"amp data freshness unknown — no successful update recorded"*) ok "missing Amp freshness is explicit";;
   *) bad "missing Amp freshness was not reported";; esac
+
+echo "T9: ⌘N drift is measured on cmux's NUMBERED rows, not raw indices"
+# cmux 0.64.22 (#9176) numbers only the ordinary sidebar rows: a group's ANCHOR
+# renders as the group header and every member of a COLLAPSED group is hidden, so
+# each one shrinks the numbered list and pulls every row below it a key UP.
+# win-b parks its four meters at raw indices 8…11 with "last-real" at 12 — an
+# all-clear by raw index. Making "one" (index 0) a group anchor drops the numbered
+# count to 12, so the '5h' meter slides to position 7 and really does answer ⌘8.
+# Reading raw .index here reports a FALSE all-clear; that is the regression.
+out5="$(STUB_GROUPS='{"groups":[{"name":"G","anchor_workspace_ref":"w1","is_collapsed":false,"member_workspace_refs":["w1"]}]}' bash "$DOCTOR" 2>&1)"
+case "$out5" in *"are eating ⌘8"*) ok "a group anchor above the meters is counted (⌘8 reported eaten)";;
+  *) bad "group anchor ignored — doctor still reports a raw-index all-clear";; esac
+case "$out5" in *"all 9 ⌘ keys in window win-b"*) bad "doctor claimed all-clear despite the shifted numbering";;
+  *) ok "no false all-clear for the grouped window";; esac
+
+# Collapsing a group hides its non-anchor members too, so a collapsed group of
+# three above the meters costs three positions, not one.
+out6="$(STUB_GROUPS='{"groups":[{"name":"G","anchor_workspace_ref":"w1","is_collapsed":true,"member_workspace_refs":["w1","w2","w3"]}]}' bash "$DOCTOR" 2>&1)"
+case "$out6" in *"are eating ⌘6, ⌘7, ⌘8"*) ok "collapsed members are excluded (three meters land in the keyed band)";;
+  *) bad "collapsed group members were still counted as numbered rows";; esac
+
+# A window with no groups must behave exactly as before — the fix may not move
+# the baseline, or every ungrouped user's layout silently changes meaning.
+case "$out" in *"all 9 ⌘ keys in window win-b are on real workspaces"*) ok "ungrouped baseline is unchanged";;
+  *) bad "ungrouped baseline regressed";; esac
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
