@@ -187,6 +187,15 @@ Code:
 `Notification` drives `❓ waiting-on-you` (permission prompts); `UserPromptSubmit`/`PreToolUse`
 drive `⚡ working`; `PreCompact`/`PostCompact` drive `⏳ compacting`; `Stop`/`SessionEnd` clear it.
 
+Markers are reference-counted per workspace and reaped two ways: the session's process dying
+(`kill -0`), and the session going quiet. The second one matters because a turn can end without
+ever firing `Stop` — an Esc-interrupt that leaves the session alive, or an agent host process that
+outlives the turn — and a marker whose process is genuinely still alive would otherwise stay pinned
+indefinitely. Working/compacting state that has not been refreshed for `CMUX_SENTINEL_WORK_TTL`
+seconds (default `3600`; `0` restores pure process-liveness) is treated as a finished turn and
+cleared at the next reconcile. `❓ waiting-on-you` is deliberately exempt — nothing refreshes it
+while you are away from the keyboard, so it never expires on a timer.
+
 ### Amp working-state rows (opt-in)
 
 `./install.sh --with-amp` installs `~/.config/amp/plugins/cmux-sentinel-amp.ts` and the neutral

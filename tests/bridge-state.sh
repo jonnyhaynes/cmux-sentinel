@@ -46,6 +46,11 @@ title() { cat "$ROOT/.title" 2>/dev/null; }
 fire()  { echo '{}' | CMUX_CLAUDE_PID="$2" bash "$BRIDGE" "$1"; }
 # fire a PreToolUse carrying a tool_name (for the AskUserQuestion/ExitPlanMode path)
 firet() { printf '{"tool_name":"%s"}' "$3" | CMUX_CLAUDE_PID="$2" bash "$BRIDGE" "$1"; }
+# fire with an explicit staleness TTL ($3 seconds; 0 disables expiry)
+firel() { echo '{}' | CMUX_CLAUDE_PID="$2" CMUX_SENTINEL_WORK_TTL="$3" bash "$BRIDGE" "$1"; }
+# Back-date a state file well past any TTL. `-t CCYYMMDDhhmm` is the one form both
+# BSD/macOS and GNU touch accept, so the K block needs no sleeps to age a file.
+stale() { touch -t 200001010000 "$1"; }
 ck()    { if [ "$(title)" = "$2" ]; then pass=$((pass + 1)); printf '  ✓ %s\n' "$1"
           else fail=$((fail + 1)); printf '  ✗ %s — got [%s] want [%s]\n' "$1" "$(title)" "$2"; fi; }
 
@@ -122,6 +127,42 @@ firet PreToolUse "$A" AskUserQuestion;  ck "A asks → ❓ (outranks B work)" "�
 fire  PreToolUse "$PID2";               ck "B works on, A still waiting → ❓" "❓multi"
 fire  PreToolUse "$A";                  ck "A answered → ⚡ (B alive)"     "⚡multi"
 fire  Stop "$A"; fire Stop "$PID2";     ck "both stop → idle"             "multi"
+
+echo "K: turn ended without Stop while its process stayed ALIVE → staleness reaps it"
+# The real-world bug: Amp's plugin runtime is one process per amp SESSION, not per
+# turn, so an abandoned thread left a ⚡ pinned for days — kill -0 answered "alive"
+# and every SessionStart reconcile faithfully re-asserted it. PID2 stands in for
+# that long-lived host. Uses the SHIPPED default TTL, not a test-only short one.
+printf 'Scribe' > "$ROOT/.title"; rm -rf "$WORKDIR"
+fire PreToolUse  "$PID2"; ck "long-lived host works → ⚡"              "⚡Scribe"
+stale "$WORKDIR/$PID2"
+fire SessionStart "$A";   ck "abandoned turn (pid ALIVE, file stale) → idle" "Scribe"
+
+echo "K2: a FRESH working file is never reaped (no over-eager expiry)"
+printf 'Scribe' > "$ROOT/.title"; rm -rf "$WORKDIR"
+fire PreToolUse   "$PID2"; ck "works → ⚡"                     "⚡Scribe"
+fire SessionStart "$A";    ck "within TTL → ⚡ kept"           "⚡Scribe"
+fire Stop         "$PID2"; ck "Stop → idle"                   "Scribe"
+
+echo "K3: CMUX_SENTINEL_WORK_TTL=0 opts back out to pure PID liveness"
+printf 'Scribe' > "$ROOT/.title"; rm -rf "$WORKDIR"
+fire PreToolUse "$PID2"; ck "works → ⚡"                       "⚡Scribe"
+stale "$WORKDIR/$PID2"
+firel SessionStart "$A" 0; ck "TTL=0 → stale file still counts → ⚡" "⚡Scribe"
+fire  Stop "$PID2";        ck "Stop → idle"                   "Scribe"
+
+echo "K4: compaction that never finished (pid alive) expires → ⏳ reaped"
+printf 'Gettext' > "$ROOT/.title"; rm -rf "$WORKDIR"
+fire PreCompact "$PID2"; ck "compacting → ⏳"                  "⏳Gettext"
+stale "$WORKDIR/.compacting.$PID2"
+fire SessionStart "$A";  ck "stale compacting flag → idle"     "Gettext"
+
+echo "K5: ❓ waiting must NOT expire — nothing refreshes it while you're away"
+printf 'enaia' > "$ROOT/.title"; rm -rf "$WORKDIR"
+firet PreToolUse "$PID2" AskUserQuestion; ck "asks → ❓"       "❓enaia"
+stale "$WORKDIR/$PID2"; stale "$WORKDIR/.waiting.$PID2"
+fire SessionStart "$A";  ck "blocked-on-you survives any age → ❓" "❓enaia"
+fire Stop        "$PID2"; ck "Stop → idle"                    "enaia"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

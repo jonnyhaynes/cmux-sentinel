@@ -31,7 +31,7 @@
 #
 # MULTIPLE AGENTS per workspace are REFERENCE-COUNTED via per-workspace state
 # files under $WORKROOT/<workspace_id>/:
-#   <pid>              — a live working session (touched each turn)
+#   <pid>              — a live working session (touched each turn; expires, below)
 #   .compacting.<pid>  — that session is compacting right now
 #   .waiting.<pid>     — that session is blocked on the user right now
 #   .marked            — fast-path flag: title already carries the ⚡ work marker
@@ -39,9 +39,19 @@
 # can't strand a marker. One agent's Stop never clears another's. Codex can reuse
 # the same set via `cmux hooks codex` pointed at this script.
 #
-# KNOWN EDGE (matches upstream #4389/#2488): an Esc-interrupted but still-ALIVE
-# session fires no Stop hook, so its ⚡ lingers until the next turn re-asserts or
-# a real Stop clears it. PID-liveness reaps crashes, not interrupted-alive turns.
+# STALENESS: liveness alone is NOT enough. `kill -0` reaps CRASHES, but says
+# nothing about a turn that ended without ever firing Stop — an Esc-interrupted
+# but still-ALIVE session (upstream #4389/#2488), or an adapter whose host
+# process outlives the turn. The latter bit for real: Amp's plugin runtime is one
+# process per amp SESSION, not per turn, so an abandoned amp thread kept a ⚡
+# pinned on a workspace for DAYS while `kill -0` truthfully answered "alive" and
+# every SessionStart reconcile faithfully re-asserted it. So a working pid file
+# must also be FRESH: _set_working touches it on every turn event, so one left
+# untouched for _WORK_TTL seconds belongs to a turn that is over, and gets reaped.
+# Compacting flags expire the same way (PreCompact→PostCompact is bounded by
+# minutes). `.waiting.<pid>` deliberately does NOT expire — nothing refreshes it
+# while a session sits blocked on YOU, and "needs you" is the last signal that
+# should vanish on a timer. Tune with CMUX_SENTINEL_WORK_TTL (0 → pure liveness).
 
 # Capability query for adapters that may be newer than the installed bridge. It
 # intentionally runs before the cmux/socket gates and returns a token, not merely
@@ -78,20 +88,47 @@ _ws()    { printf '%s' "${CMUX_WORKSPACE_ID:-}"; }
 _sess()  { printf '%s' "${CMUX_SENTINEL_SESSION_PID:-${CMUX_CLAUDE_PID:-$PPID}}"; }
 _alive() { kill -0 "$1" 2>/dev/null; }
 
+# mtime of $1 in epoch seconds, or FAIL when it can't be read. stat: GNU (-c)
+# first, then BSD/macOS (-f) — runtime is macOS but the offline harness runs on
+# Linux CI, and the numeric guard rejects either's garbage.
+_mtime() {
+  local mt
+  mt=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null) || return 1
+  case "$mt" in '' | *[!0-9]*) return 1 ;; esac
+  printf '%s' "$mt"
+}
+
 # The .marked fast-path flag is trusted only while FRESH (< TTL old). This bounds
 # how long a desync survives if the title is changed OUT from under the bridge
 # (manual rename, cmux restart re-persisting an old title): the hot path stays
 # cheap (skips the ~44ms title read) for TTL seconds, then re-verifies and
-# self-heals. stat: GNU (-c) first, then BSD/macOS (-f) — runtime is macOS but the
-# offline harness runs on Linux CI, and the numeric guard rejects either's garbage.
+# self-heals. Any doubt → not fresh, i.e. fall through to the cold path, which
+# re-reads the title and is always correct.
 _MARK_TTL=30
 _marked_fresh() {
-  local m="$1/.marked" mt now
+  local m="$1/.marked" mt
   [ -f "$m" ] || return 1
-  mt=$(stat -c %Y "$m" 2>/dev/null || stat -f %m "$m" 2>/dev/null) || return 1
-  case "$mt" in '' | *[!0-9]*) return 1 ;; esac
-  now=$(date +%s)
-  [ $((now - mt)) -lt "$_MARK_TTL" ]
+  mt=$(_mtime "$m") || return 1
+  [ $(($(date +%s) - mt)) -lt "$_MARK_TTL" ]
+}
+
+# How long a working/compacting state file is trusted without a refresh. See the
+# STALENESS note in the header for why liveness alone strands markers. Generous
+# by default: _set_working only refreshes on turn EVENTS, and one tool call can
+# legitimately run for a long time (a build, a full test suite). Overshooting
+# costs a stale row for a while; undershooting drops ⚡ mid-turn until the next
+# hook re-asserts it, so err long.
+_WORK_TTL="${CMUX_SENTINEL_WORK_TTL:-3600}"
+
+# True when $1 has not been touched for _WORK_TTL seconds → its turn is over.
+# Every uncertain path (TTL disabled, non-numeric TTL, unreadable mtime) answers
+# "not expired": the safe failure direction is keeping a marker we might reap,
+# never reaping one belonging to a live turn.
+_expired() {
+  local mt
+  [ "$_WORK_TTL" -gt 0 ] 2>/dev/null || return 1
+  mt=$(_mtime "$1") || return 1
+  [ $(($(date +%s) - mt)) -ge "$_WORK_TTL" ]
 }
 
 # Strip any leading activity marker (at most one is present).
@@ -111,17 +148,17 @@ _title_of() {
     | sed -E "s/^.*${1}[[:space:]]+//; s/[[:space:]]*\[selected\]\$//"
 }
 
-# Desired marker for a workspace dir, reaping dead PIDs as a side effect.
-# Precedence: compacting > waiting > working > none.
+# Desired marker for a workspace dir, reaping dead AND stale entries as a side
+# effect. Precedence: compacting > waiting > working > none.
 _desired_mark() {
   local dir="$1" f pid live=0 comp=0 wait=0
   [ -d "$dir" ] || { printf ''; return 0; }
   for f in "$dir"/.compacting.*; do
     [ -e "$f" ] || continue
     pid="${f##*.compacting.}"
-    if _alive "$pid"; then comp=1; else rm -f "$f"; fi
+    if _alive "$pid" && ! _expired "$f"; then comp=1; else rm -f "$f"; fi
   done
-  for f in "$dir"/.waiting.*; do
+  for f in "$dir"/.waiting.*; do # NO staleness check — see the header
     [ -e "$f" ] || continue
     pid="${f##*.waiting.}"
     if _alive "$pid"; then wait=1; else rm -f "$f"; fi
@@ -129,7 +166,7 @@ _desired_mark() {
   for f in "$dir"/*; do # non-dotfiles only → working session pids
     [ -e "$f" ] || continue
     pid="${f##*/}"
-    if _alive "$pid"; then live=1; else rm -f "$f"; fi
+    if _alive "$pid" && ! _expired "$f"; then live=1; else rm -f "$f"; fi
   done
   if [ "$comp" = 1 ]; then printf '%s' "$COMPMARK"
   elif [ "$wait" = 1 ]; then printf '%s' "$WAITMARK"

@@ -215,9 +215,9 @@ cmux sidebar validate workspaces && cmux sidebar reload   # synthetic interpreta
 make sidebar-live                     # mount repo sidebar against live data; human visual verdict
 
 # offline tests (stub cmux/security/curl/$HOME — run in CI too)
-make test   # bridge-state(36) poller-gate(38) codex-poller(83) install-hooks(52) sentinel-setup(52)
+make test   # bridge-state(49) poller-gate(38) codex-poller(83) install-hooks(52) sentinel-setup(52)
             # sentinel-doctor(35) group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(23)
-            # amp-bridge(43) amp-poller(49) = 473 assertions total
+            # amp-bridge(43) amp-poller(49) = 486 assertions total
 ```
 
 ## Architecture / where things live
@@ -254,6 +254,26 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   `$TMPDIR/cmux-sentinel-work/<ws>/` and reaps dead PIDs (`kill -0`), so multiple agents and crashes
   are handled; a `.marked` flag (30s TTL) keeps the per-tool-call hot path off the ~44ms title read.
   Test the state machine offline with the stubbed-cmux harness (see `.claude/` working docs).
+  **`kill -0` alone is NOT a sufficient reaper — it reaps CRASHES, not turns that ended without a
+  `Stop`.** Bit for real on 2026-08-14: two workspaces (`claude-elixir-phoenix`, `Scribe`) sat at ⚡
+  for THREE DAYS. Both were Amp: `hooks/amp-bridge.ts` uses `process.pid`, which is Amp's **plugin
+  runtime host — one process per amp SESSION, not per turn** (`amp run …/plugin-runtime.ts
+  …/cmux-sentinel-amp.ts`, still alive with an `amp threads continue T-…` parent). The threads were
+  abandoned, `agent.end` never fired, the ref-count file was never removed — and `kill -0`
+  truthfully answered "alive" forever. Worse, `_reconcile_all()` on every SessionStart faithfully
+  **re-asserted** the stale ⚡ and refreshed `.marked`, so the self-heal path made it look deliberate;
+  `_sweep_orphan_marks` couldn't help either (it defers to `_desired_mark`, which said ⚡). Same
+  class as the documented Esc-interrupt edge, but unbounded because a plugin-runtime host has no
+  reason to exit. **Fix: liveness AND freshness.** `_set_working` touches the pid file on every turn
+  event, so `_desired_mark` now also reaps working/compacting entries untouched for `_WORK_TTL`
+  (`CMUX_SENTINEL_WORK_TTL`, default 3600s; `0` = old pure-liveness behaviour). `_expired()` answers
+  "not expired" on every uncertain path (TTL off, non-numeric, unreadable mtime) — reaping a live
+  turn's marker is the worse failure. **`.waiting.<pid>` is deliberately EXEMPT**: nothing refreshes
+  it while a session sits blocked on you, so a TTL would silently delete exactly the ❓ signal that
+  matters most. Err LONG on the TTL — one tool call (a build, a full suite) can legitimately run for
+  a long time; overshooting costs a stale row, undershooting drops ⚡ mid-turn. Regression-tested in
+  `tests/bridge-state.sh` K–K5 (back-dated with `touch -t CCYYMMDDhhmm`, the one form both BSD and
+  GNU accept, so the block needs no sleeps).
 
 - **Amp agent state needs OUR OWN plugin — cmux's native amp integration cannot light up this
   sidebar.** `cmux hooks amp install` writes `~/.config/amp/plugins/cmux-session.ts`, which reports
