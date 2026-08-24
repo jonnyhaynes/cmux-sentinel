@@ -446,7 +446,12 @@ func meterRing(_ w) -> some View {
       Text(meterReset(meterFallbackDetail(w)))
         .font(.system(size: 9, design: .monospaced)).foregroundColor("#6E7787").lineLimit(1)
     }
+    Spacer()
   }
+  // Each cell fills half the row (maxWidth: .infinity works in this interpreter), so
+  // with two rings per row the second column starts at exactly 50% — the rings align
+  // on a grid instead of packing left.
+  .frame(maxWidth: .infinity, alignment: .leading)
 }
 
 // ── ⌘N shortcut digit ─────────────────────────────────────────────
@@ -652,12 +657,12 @@ VStack(alignment: .leading, spacing: 0) {
   // week, side by side): ring fill = brand hue, centre % is severity-coloured
   // (red ≥90 / amber ≥70). Hidden unless at least one provider has sentinels.
   if workspaces.filter { isUsageMeter($0) }.count > 0 {
-    VStack(alignment: .leading, spacing: 4) {
+    VStack(alignment: .leading, spacing: 15) {
       Text("USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
 
       // COMMAND CODE — two rings (session left, week right). cc5h sorted before cc7d.
       if workspaces.filter { isCommandCodeMeter($0) }.count > 0 {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 0) {
           ForEach(workspaces.filter { isCommandCodeMeter($0) }.sorted { $0.title.hasPrefix("cc5h") && !$1.title.hasPrefix("cc5h") }) { w in
             meterRing(w)
           }
@@ -667,7 +672,7 @@ VStack(alignment: .leading, spacing: 0) {
       // CLAUDE — two rings (5h left of 7d). Match the PREFIX, never a substring:
       // a weekly countdown can itself contain "5h".
       if workspaces.filter { isClaudeMeter($0) }.count > 0 {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 0) {
           ForEach(workspaces.filter { isClaudeMeter($0) }.sorted { $0.title.hasPrefix("5h") && !$1.title.hasPrefix("5h") }) { w in
             meterRing(w)
           }
@@ -676,7 +681,7 @@ VStack(alignment: .leading, spacing: 0) {
 
       // CODEX — hidden unless Codex sentinels exist. Fed by bin/cmux-codex-usage.sh.
       if workspaces.filter { isCodexMeter($0) }.count > 0 {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 0) {
           ForEach(workspaces.filter { isCodexMeter($0) }.sorted { $0.title.hasPrefix("cx5h") && !$1.title.hasPrefix("cx5h") }) { w in
             meterRing(w)
           }
@@ -685,12 +690,18 @@ VStack(alignment: .leading, spacing: 0) {
 
       // AMP — hidden unless Amp sentinels exist. Fed by bin/cmux-amp-usage.sh.
       if workspaces.filter { isAmpMeter($0) }.count > 0 {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 0) {
           ForEach(workspaces.filter { isAmpMeter($0) }.sorted { $0.title.contains("ampu") && !$1.title.contains("ampu") }) { w in
             meterRing(w)
           }
         }
       }
+
+      // Bottom breathing room before the divider. Adds ON TOP of the VStack's 15px
+      // gap, so the space below the last ring row is a touch more than the row-to-row
+      // gap — tuned by this height (done here, not via chained .padding on the cluster,
+      // which compounds and inflates every edge in this interpreter).
+      Rectangle().fill("#1F2430").frame(height: 0)
     }
     .padding(9)
     Divider()
