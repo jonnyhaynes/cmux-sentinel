@@ -197,6 +197,34 @@ seconds (default `3600`; `0` restores pure process-liveness) is treated as a fin
 cleared at the next reconcile. `❓ waiting-on-you` is deliberately exempt — nothing refreshes it
 while you are away from the keyboard, so it never expires on a timer.
 
+### Meaningful workspace titles (the title hook)
+
+Installed alongside the bridge, `hooks/cmux-title.sh` gives each workspace a human-readable title
+`<brand> repo · branch` instead of the agent's generic default (`Claude Code`, `Title Placeholder`):
+
+- **brand glyph** identifies the agent — `✳` Claude Code, `⌘` Command Code, `◇` Codex (none for a
+  plain shell). The sidebar renders this as the row's agent icon.
+- **repo** = git toplevel basename → the row title. **branch** → the `⑂` line. cmux's native
+  `w.branch` is only populated for agent-session workspaces, so the branch is packed into the title
+  and the sidebar splits it back out.
+
+Registered on `SessionStart` + `UserPromptSubmit` (so the branch tracks mid-session checkouts). The
+bridge paints its status glyph (`⚡`/`⏳`/`❓`) onto the *front* of this title; the sidebar strips it
+for display. Plain (non-agent) terminals can self-title too — add to `~/.zshrc`:
+
+```bash
+_cmux_title() { [ -n "$CMUX_WORKSPACE_ID" ] && CMUX_TITLE_AGENT=none "$HOME/.claude/hooks/cmux-title.sh" </dev/null &>/dev/null &! ; }
+add-zsh-hook chpwd _cmux_title; _cmux_title
+```
+
+**Window titlebar:** the sidebar interpreter can only read `w.title`, so the status glyph has to
+live there. To keep it out of the macOS titlebar, point the titlebar at a separate, glyph-free
+source in `~/.config/cmux/cmux.json`:
+
+```json
+"app": { "windowTitleTemplate": "{activeDirectory}" }
+```
+
 ### Amp working-state rows (opt-in)
 
 `./install.sh --with-amp` installs `~/.config/amp/plugins/cmux-sentinel-amp.ts` and the neutral

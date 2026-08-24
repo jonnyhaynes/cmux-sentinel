@@ -261,6 +261,28 @@ if [ "${WITH_BRIDGE:-0}" = "1" ] || [ -f "$HOME/.claude/hooks/cmux-bridge.sh" ];
   fi
 fi
 
+# 5a-ii. Agent title hook (installed alongside the bridge). Sets a human-readable
+#     workspace title "<brand> repo · branch" (brand: ✳ Claude / ⌘ Command Code /
+#     ◇ Codex) that the sidebar parses for the row title, ⑂ branch line, and agent
+#     icon — and that the bridge paints its status glyph onto. Registered on the same
+#     turn events as the bridge so the branch stays fresh mid-session. Gated behind an
+#     already-present bridge (it complements it; no point titling without status).
+#
+#     NOTE — window titlebar: because the sidebar interpreter can ONLY read w.title,
+#     the status glyph (⚡/⏳/❓) must ride the title. To keep it out of the macOS
+#     titlebar, set  "app": { "windowTitleTemplate": "{activeDirectory}" }  in
+#     ~/.config/cmux/cmux.json (a separate, glyph-free source). See the sidebar header.
+if [ -f "$HOME/.claude/hooks/cmux-bridge.sh" ]; then
+  bak "$HOME/.claude/hooks/cmux-title.sh" "$here/hooks/cmux-title.sh"
+  install -m 0755 "$here/hooks/cmux-title.sh" "$HOME/.claude/hooks/cmux-title.sh"
+  echo "  -> ~/.claude/hooks/cmux-title.sh"
+  if grep -q 'cmux-bridge' "$HOME/.claude/settings.json" 2>/dev/null; then
+    # shellcheck disable=SC2088
+    register_hooks '~/.claude/hooks/cmux-title.sh' 'cmux-title' \
+      SessionStart UserPromptSubmit
+  fi
+fi
+
 # 5b. Zed integration (opt-in via --with-zed / WITH_ZED=1). Mirrors the bridge block:
 #     also refreshes an already-installed zed-bridge on a plain re-run. Installs the
 #     Zed status bridge + the cmux→Zed handoff and usage-TUI helpers, and wires the
