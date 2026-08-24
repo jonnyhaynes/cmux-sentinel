@@ -246,25 +246,33 @@ used_from_remaining() { # $1 = remaining pct (already sanitized 0-100)
   printf '%s' "$(( 100 - ${1:-0} ))"
 }
 
+# Failure ledger for --update. A sentinel is an ordinary workspace users can close,
+# and writing meters in sequence with a `die` on the first failure meant ONE closed
+# sentinel froze every meter after it at whatever it last said — for days, since
+# each run aborted in the same place. Record instead of exiting, paint everything
+# paintable, report once at the end.
+MISSING=(); REJECTED=()
+
 # Write ONE sentinel: a real meter, or an honest "n/a" when the allowance isn't
 # reported. A MISSING sentinel for a bucket we don't meter is the intended steady
-# state (setup skips it), so that's a quiet no-op; a missing sentinel for a LIVE
-# one is a real broken install and dies.
+# state (setup skips it), so that's a quiet no-op; a missing sentinel for a LIVE one
+# is a real broken install, recorded in the ledger so the OTHER meter still updates.
 _update_bucket() { # $1=label $2=na(0/1) $3=used_pct $4=reset_text
   local label="$1" na="$2" pct="${3:-0}" human="${4:-?}" bar dot frac detail err rc
   if [ "$na" = 1 ]; then
     err=$(_paint "$label" "$label |n/a|"); rc=$?
     [ "$rc" = 10 ] && return 0
-    [ "$rc" = 11 ] && die "rename rejected for $label sentinel: ${err:-no detail}"
+    [ "$rc" = 11 ] && { REJECTED+=("$label (${err:-no detail})"); return 1; }
     _clear_progress "$label"
-    return
+    return 0
   fi
   human=$(compact_reset_text "$human")
   bar=$(make_bar "$pct" 14); dot=$(sev_dot "$pct"); frac=$(to_frac "$pct")
   detail="${pct}% (${human})${dot}"
   err=$(_meter_write "$label" "$label |${detail}|${bar}" "$frac" "$detail"); rc=$?
-  [ "$rc" = 10 ] && die "no '$label' sentinel workspace (title \"$label\" or starting \"$label \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
-  [ "$rc" = 11 ] && die "rename rejected for $label sentinel: ${err:-no detail}"
+  [ "$rc" = 10 ] && { MISSING+=("$label"); return 1; }
+  [ "$rc" = 11 ] && { REJECTED+=("$label (${err:-no detail})"); return 1; }
+  return 0
 }
 
 main() {
@@ -332,9 +340,11 @@ main() {
 
   if [ "$mode" = "--update" ]; then
     cmux ping &>/dev/null || die "cmux socket rejected (restart cmux to apply socketControlMode=automation)"
-    _update_bucket "$LABEL_AMPU" "$naU" "${usedU:-0}" "$human"
-    [ "$ORB_METER" = "1" ] && _update_bucket "$LABEL_AMPO" "$naO" "${usedO:-0}" "$human"
+    _update_bucket "$LABEL_AMPU" "$naU" "${usedU:-0}" "$human" || true
+    [ "$ORB_METER" = "1" ] && { _update_bucket "$LABEL_AMPO" "$naO" "${usedO:-0}" "$human" || true; }
+    [ "${#REJECTED[@]}" -gt 0 ] && die "cmux rejected the rename for: ${REJECTED[*]}"
     record_success || echo "WARN: meters updated, but couldn't record Amp freshness in $USAGE_STATE_DIR" >&2
+    [ "${#MISSING[@]}" -gt 0 ] && die "no sentinel workspace for: ${MISSING[*]} — create it: ~/bin/cmux-sentinel-setup.sh"
     return 0
   fi
 

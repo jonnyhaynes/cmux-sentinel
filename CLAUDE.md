@@ -215,9 +215,9 @@ cmux sidebar validate workspaces && cmux sidebar reload   # synthetic interpreta
 make sidebar-live                     # mount repo sidebar against live data; human visual verdict
 
 # offline tests (stub cmux/security/curl/$HOME — run in CI too)
-make test   # bridge-state(49) poller-gate(38) codex-poller(83) install-hooks(52) sentinel-setup(52)
-            # sentinel-doctor(35) group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(23)
-            # amp-bridge(43) amp-poller(49) = 486 assertions total
+make test   # bridge-state(49) poller-gate(55) codex-poller(83) install-hooks(52) sentinel-setup(52)
+            # sentinel-doctor(36) group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(23)
+            # amp-bridge(43) amp-poller(49) = 504 assertions total
 ```
 
 ## Architecture / where things live
@@ -397,8 +397,34 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   (launchd) socket commands start getting rejected, the automation mode regressed → restart cmux.
   Every complete provider `--update` atomically records an epoch under
   `~/.local/state/cmux-sentinel/usage/`; doctor warns when an enabled provider has no success stamp
-  or the last one is older than `USAGE_STALE_AFTER_SECONDS` (default 900, zero disables). Offline/
-  partial/read-only runs never advance the stamp, so "launchd loaded" cannot mask a stuck poller.
+  or the last one is older than `USAGE_STALE_AFTER_SECONDS` (default 900, zero disables). Offline and
+  read-only runs never advance the stamp, so "launchd loaded" cannot mask a stuck poller. A run whose
+  DATA arrived but whose write partly failed does advance it — freshness is about the data, not about
+  whether every sentinel still exists (next bullet).
+- **A meter write failure is per-METER, and a fetch failure is CLASSIFIED.** Three ways the panel
+  could lie for days, all found together on a user's install (2026-08-24). **(1)** The pollers wrote
+  their sentinels in sequence and `die`d on the first failure, so ONE closed sentinel — an ordinary
+  workspace anyone can close — froze every meter after it on whatever it last said. Real damage: a
+  healthy fetch, a healthy `7d` row and a 5-minute launchd job, and `7d` still sat on a stale
+  `⚠ offline` for 3½ days because every run aborted at the missing `5h`. All three pollers now keep a
+  `MISSING`/`REJECTED` ledger, paint every sentinel they CAN resolve, and report once at the end.
+  **(2)** Freshness and meter-presence are now SEPARATE signals: a meter that landed stamps
+  `record_success` even when a sibling sentinel is gone, because "is data flowing" and "is the meter
+  installed" are different questions — conflating them made one closed workspace read as a dead
+  poller, and the stale warning's "run `--update`" advice then failed with the very same error. A
+  REJECTED rename (cmux refused the write) is still a broken pipeline: no stamp. **(3)** The Claude
+  poller's `fetch_usage` returns a failure CLASS as its **exit status** (`FETCH_AUTH`/`FETCH_RATE`/
+  `FETCH_SERVER`/`FETCH_NET`) — it has to ride the exit status because the caller runs it inside a
+  command substitution, where an assigned variable never escapes the subshell — so the sidebar shows
+  `⚠ auth` (401/403: only Claude Code refreshes that token, this poller only reads it) vs
+  `⚠ rate limit` (429: raise `StartInterval`) vs `⚠ api down` vs `⚠ offline`. Both 401s and 429s are
+  real and common (34 and 19 respectively in one machine's launchd `.err`), and they need OPPOSITE
+  fixes, which is why the old "token expired? endpoint changed? offline?" guess-list was useless. The
+  response BODY is never printed — only the status, on stderr. Dropping `curl -f` is what makes the
+  status readable; the parse tolerates a missing `-w` line and falls back to the exit code.
+  Complementing it, `bin/cmux-sentinel-doctor.sh` reads the plist's `StandardErrorPath` and prints the
+  newest `ERR:` line under a stale provider, so "stale — and now what?" answers itself. Regression
+  tests: `tests/poller-gate.sh` T7–T9, `tests/sentinel-doctor.sh` T8.
 - **launchd does not reread a changed loaded plist.** `install.sh` compares generated plist content,
   leaves unchanged jobs alone, and by default prints exact `bootout` + `bootstrap` commands for a
   changed+loaded job. `--reload-agents` / `RELOAD_AGENTS=1` explicitly performs only those targeted

@@ -187,7 +187,24 @@ printf '%s\n' "$now" > "$state/claude.last-success"
 printf '%s\n' "$((now - 901))" > "$state/codex.last-success"
 rm -f "$state/amp.last-success"
 printf 'USAGE_PROVIDERS="claude codex amp"\nUSAGE_STALE_AFTER_SECONDS=900\n' > "$HOME/.config/cmux/usage-sentinels.env"
+# "stale" says a poller stopped succeeding but not WHY — launchd already captured the
+# reason, so the plist's StandardErrorPath is read back and the newest ERR: surfaced.
+mkdir -p "$HOME/Library/LaunchAgents"
+cat > "$HOME/Library/LaunchAgents/com.cmux-codex-usage.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cmux-codex-usage</string>
+  <key>StandardErrorPath</key>
+  <string>$ROOT/codex-usage.err</string>
+</dict>
+</plist>
+PLIST
+printf 'some older noise\nERR: Codex login expired; run codex logout, then codex login\n' > "$ROOT/codex-usage.err"
 out4="$(STUB_CODEX_RPC=expanded bash "$DOCTOR" 2>&1)"
+case "$out4" in *"last poller error: ERR: Codex login expired"*) ok "a stale provider reports the poller's own last error";;
+  *) bad "stale provider did not surface the launchd error log";; esac
 case "$out4" in *"claude data fresh (updated "*) ok "fresh Claude update is recognized";;
   *) bad "fresh Claude update was not recognized";; esac
 case "$out4" in *"codex data stale (last successful update 15m ago; expected within 15m)"*) ok "stale Codex data is actionable";;

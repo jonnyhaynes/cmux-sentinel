@@ -166,6 +166,24 @@ _meter_write() { # $1=label  $2=title  $3=progress_value(0..1)  $4=progress_labe
   return 0
 }
 
+# Paint ONE meter, recording WHY it failed instead of exiting on the spot.
+# Load-bearing: a sentinel is an ordinary workspace users can close, and the old
+# code wrote 5h first and died on the first failure — so one closed sentinel froze
+# the OTHER meter at whatever it last said (an "⚠ offline" from some earlier blip,
+# for days, because every 5-minute run aborted in the same place before it reached
+# 7d). Collect, paint everything paintable, then report once.
+MISSING=(); REJECTED=()
+paint_meter() { # $1=label  $2=title  $3=progress_value(0..1)  $4=progress_label
+  local err rc
+  err=$(_meter_write "$1" "$2" "$3" "$4"); rc=$?
+  case "$rc" in
+    0)  return 0 ;;
+    10) MISSING+=("$1") ;;
+    *)  REJECTED+=("$1 (${err:-no detail})") ;;
+  esac
+  return 1
+}
+
 # Drop a sentinel's progress bar so the sidebar falls back to its TITLE text (e.g.
 # the "⚠ offline" marker) instead of showing a stale native bar. Best-effort.
 _clear_progress() { # $1 = label
@@ -191,11 +209,46 @@ read_token() {
   printf '%s' "$tok"
 }
 
-fetch_usage() {
-  curl -fsS --max-time 15 "$USAGE_ENDPOINT" \
+# fetch_usage's EXIT STATUS is the failure class. A bare "it failed" is a guess-list,
+# and the two failures that actually happen need OPPOSITE fixes (401 = let Claude
+# Code mint a fresh token; 429 = poll less often), so the class drives both the error
+# text and the marker the sidebar shows. It has to ride the exit status rather than a
+# variable because the caller runs this inside a command substitution — a subshell,
+# from which no assignment escapes.
+FETCH_OK=0; FETCH_AUTH=2; FETCH_RATE=3; FETCH_SERVER=4; FETCH_NET=5; FETCH_HTTP=6
+
+fetch_usage() { # $1 = token. Prints the body on success; else returns a FETCH_* class.
+  local out rc code body
+  # No -f: a 4xx must still yield its STATUS so it can be classified. The body of a
+  # failed response is deliberately never printed or logged (same rule as the Codex
+  # poller) — only the code is.
+  out=$(curl -sS --max-time 15 -w '\n%{http_code}' \
     -H "Authorization: Bearer $1" \
     -H "anthropic-beta: $OAUTH_BETA" \
-    -H "Content-Type: application/json"
+    -H "Content-Type: application/json" \
+    "$USAGE_ENDPOINT" 2>/dev/null); rc=$?
+  # -w appends the status as the last line; tolerate its absence (an old curl, a
+  # test stub) by falling back to the exit status alone rather than misreading the
+  # body's last line as a status.
+  code="${out##*$'\n'}"
+  case "$code" in
+    [0-9][0-9][0-9]) body="${out%$'\n'*}" ;;
+    *) code=""; body="$out" ;;
+  esac
+  case "$code" in
+    ''|000)  [ "$rc" -eq 0 ] && { printf '%s' "$body"; return "$FETCH_OK"; }
+             return "$FETCH_NET" ;;
+    2??)     printf '%s' "$body"; return "$FETCH_OK" ;;
+  esac
+  # The status is useful in the launchd log; the response BODY never is (and could
+  # carry account detail), so only the code is ever emitted.
+  echo "usage endpoint returned HTTP $code" >&2
+  case "$code" in
+    401|403) return "$FETCH_AUTH" ;;
+    429)     return "$FETCH_RATE" ;;
+    5??)     return "$FETCH_SERVER" ;;
+    *)       return "$FETCH_HTTP" ;;
+  esac
 }
 
 # ISO8601 -> epoch seconds (BSD/macOS date). Handles Z, +00:00, fractional secs.
@@ -306,10 +359,21 @@ main() {
   fi
 
   token=$(read_token) || { [ "$mode" = "--update" ] && mark_offline "no token"; exit 1; }
-  json=$(fetch_usage "$token") || {
-    [ "$mode" = "--update" ] && mark_offline "offline"
-    die "usage request failed (token expired? endpoint changed? offline?)"
-  }
+  local marker why frc
+  json=$(fetch_usage "$token"); frc=$?
+  if [ "$frc" -ne "$FETCH_OK" ]; then
+    # The marker rides the TITLE, so it stays short; `why` is the recovery, and it
+    # lands in the launchd .err where the doctor now surfaces it.
+    case "$frc" in
+      "$FETCH_AUTH")   marker="auth"; why="the usage endpoint rejected the OAuth token (401/403). This poller only READS the token — Claude Code refreshes it — so run Claude Code once to mint a fresh one. If it persists, the unofficial endpoint may have changed." ;;
+      "$FETCH_RATE")   marker="rate limit"; why="the usage endpoint is throttling this account (429) — raise StartInterval in ~/Library/LaunchAgents/com.cmux-claude-usage.plist and reload the job" ;;
+      "$FETCH_SERVER") marker="api down"; why="api.anthropic.com returned a server error — transient, the next poll retries" ;;
+      "$FETCH_NET")    marker="offline"; why="couldn't reach api.anthropic.com (offline, DNS, or timeout)" ;;
+      *)               marker="offline"; why="the usage endpoint returned an unexpected HTTP status (logged above)" ;;
+    esac
+    [ "$mode" = "--update" ] && mark_offline "$marker"
+    die "usage request failed: $why"
+  fi
 
   if [ "$mode" = "--raw" ]; then
     printf '%s\n' "$json" | jq . 2>/dev/null || printf '%s\n' "$json"
@@ -358,7 +422,7 @@ main() {
     # Write both display channels: native progress is the normal render; the title
     # carries the compact detail + unicode bar fallback and the stable label anchor.
     # The label leads and the optional severity dot trails.
-    local fh_bar sd_bar fh_dot sd_dot fh_frac sd_frac fh_lbl sd_lbl err rc
+    local fh_bar sd_bar fh_dot sd_dot fh_frac sd_frac fh_lbl sd_lbl
     fh_bar=$(make_bar "$fh_pct" 14); fh_dot=$(sev_dot "$fh_pct"); fh_frac=$(to_frac "$fh_pct")
     sd_bar=$(make_bar "$sd_pct" 14); sd_dot=$(sev_dot "$sd_pct"); sd_frac=$(to_frac "$sd_pct")
     # Compact progress label = pct + parenthesized countdown. The native bar already
@@ -373,15 +437,27 @@ main() {
     # could drop mid-run, a ref could go stale, or the sentinel could be gone), so
     # check each: rc 10 = no sentinel (tell the user to create it), rc 11 = cmux
     # rejected the rename (surface its stderr).
-    err=$(_meter_write "$LABEL_5H" "$LABEL_5H |${fh_lbl}|${fh_bar}" "$fh_frac" "$fh_lbl"); rc=$?
-    [ "$rc" = 10 ] && die "no '$LABEL_5H' sentinel workspace (title \"$LABEL_5H\" or starting \"$LABEL_5H \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
-    [ "$rc" = 11 ] && die "rename rejected for $LABEL_5H sentinel: ${err:-no detail}"
-    err=$(_meter_write "$LABEL_7D" "$LABEL_7D |${sd_lbl}|${sd_bar}" "$sd_frac" "$sd_lbl"); rc=$?
-    [ "$rc" = 10 ] && die "no '$LABEL_7D' sentinel workspace (title \"$LABEL_7D\" or starting \"$LABEL_7D \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
-    [ "$rc" = 11 ] && die "rename rejected for $LABEL_7D sentinel: ${err:-no detail}"
+    # Report only what actually LANDED — "updated:" is a claim about writes, not
+    # about the fetch.
+    local painted=0 wrote=""
+    paint_meter "$LABEL_5H" "$LABEL_5H |${fh_lbl}|${fh_bar}" "$fh_frac" "$fh_lbl" \
+      && { painted=$((painted + 1)); wrote="${wrote}${LABEL_5H}=${fh_pct}% (${fh_human})  "; }
+    paint_meter "$LABEL_7D" "$LABEL_7D |${sd_lbl}|${sd_bar}" "$sd_frac" "$sd_lbl" \
+      && { painted=$((painted + 1)); wrote="${wrote}${LABEL_7D}=${sd_pct}% (${sd_human})  "; }
+    # A REJECTED rename is a broken write path (socket dropped, ref went stale), not
+    # a missing row — never claim freshness for it.
+    [ "${#REJECTED[@]}" -gt 0 ] && die "cmux rejected the rename for: ${REJECTED[*]}"
+    [ "$painted" -gt 0 ] || die "no Claude sentinel workspace exists in any window — create them: ~/bin/cmux-sentinel-setup.sh (or see install.sh)"
+    # A meter that landed IS fresh data, so stamp it even when a sibling sentinel is
+    # gone. Freshness answers "is data flowing"; the doctor's own sentinel check
+    # answers "is the meter installed". Conflating them is what made one closed
+    # workspace read as a dead poller — and made the stale line's "run --update"
+    # advice fail with the very same error.
     record_success || echo "WARN: meters updated, but couldn't record Claude freshness in $USAGE_STATE_DIR" >&2
-    echo "updated: ${LABEL_5H}=${fh_pct}% (${fh_human})  ${LABEL_7D}=${sd_pct}% (${sd_human})"
-    return
+    echo "updated: ${wrote%  }"
+    # Still an error — a missing sentinel is a meter nobody can see.
+    [ "${#MISSING[@]}" -gt 0 ] && die "no sentinel workspace for: ${MISSING[*]} — create it: ~/bin/cmux-sentinel-setup.sh (a sentinel is titled with its label, e.g. \"${MISSING[0]}\")"
+    return 0
   fi
 
   die "unknown mode '$mode' (use --print | --raw | --update)"

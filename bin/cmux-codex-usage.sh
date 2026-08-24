@@ -460,11 +460,19 @@ mark_offline() {
   _clear_progress "$LABEL_CX5H"; _clear_progress "$LABEL_CX7D"
 }
 
+# Failure ledger for --update. A sentinel is an ordinary workspace users can close,
+# and writing meters in sequence with a `die` on the first failure meant ONE closed
+# sentinel froze every meter after it at whatever it last said — for days, since
+# each run aborted in the same place. Record instead of exiting, paint everything
+# paintable, report once at the end.
+MISSING=(); REJECTED=()
+
 # Write ONE Codex sentinel for --update: a real meter (unicode-bar title fallback +
 # native progress) when its window exists, or an honest "n/a" (no bar, progress
 # cleared) when OpenAI didn't return that window (e.g. no 5h window on a Pro plan).
-# Keeps the label prefix so resolve_ref + the sidebar anchor still match. Dies on a
-# missing/rejected sentinel, exactly like the inline path it replaced.
+# Keeps the label prefix so resolve_ref + the sidebar anchor still match. Records a
+# missing/rejected sentinel in the ledger and returns non-zero, so the OTHER bucket
+# still gets its update.
 _update_bucket() { # $1=label  $2=na(0/1)  $3=pct  $4=human_reset
   local label="$1" na="$2" pct="${3:-0}" human="${4:-?}" bar dot frac detail err rc
   if [ "$na" = 1 ]; then
@@ -475,15 +483,16 @@ _update_bucket() { # $1=label  $2=na(0/1)  $3=pct  $4=human_reset
     # make the launchd poller fail every 5 min over a meter nobody asked for. A
     # missing sentinel for a LIVE window still dies below — that one IS a real error.
     [ "$rc" = 10 ] && return 0
-    [ "$rc" = 11 ] && die "rename rejected for $label sentinel: ${err:-no detail}"
+    [ "$rc" = 11 ] && { REJECTED+=("$label (${err:-no detail})"); return 1; }
     _clear_progress "$label"
-    return
+    return 0
   fi
   bar=$(make_bar "$pct" 14); dot=$(sev_dot "$pct"); frac=$(to_frac "$pct")
   detail="${pct}% (${human})${dot}"
   err=$(_meter_write "$label" "$label |${detail}|${bar}" "$frac" "$detail"); rc=$?
-  [ "$rc" = 10 ] && die "no '$label' sentinel workspace (title \"$label\" or starting \"$label \") in any window — create it (~/bin/cmux-sentinel-setup.sh, or see install.sh)"
-  [ "$rc" = 11 ] && die "rename rejected for $label sentinel: ${err:-no detail}"
+  [ "$rc" = 10 ] && { MISSING+=("$label"); return 1; }
+  [ "$rc" = 11 ] && { REJECTED+=("$label (${err:-no detail})"); return 1; }
+  return 0
 }
 
 main() {
@@ -599,14 +608,19 @@ main() {
   if [ "$mode" = "--update" ]; then
     cmux ping &>/dev/null || die "cmux socket rejected (restart cmux to apply socketControlMode=automation)"
     # Each bucket writes a real meter, or an honest "n/a" when its window is absent.
-    _update_bucket "$LABEL_CX5H" "$na5" "${pct5:-0}" "${h5:-?}"
-    _update_bucket "$LABEL_CX7D" "$na7" "${pct7:-0}" "${h7:-?}"
+    _update_bucket "$LABEL_CX5H" "$na5" "${pct5:-0}" "${h5:-?}" || true
+    _update_bucket "$LABEL_CX7D" "$na7" "${pct7:-0}" "${h7:-?}" || true
+    # A REJECTED rename is a broken write path, not a missing row — no freshness.
+    [ "${#REJECTED[@]}" -gt 0 ] && die "cmux rejected the rename for: ${REJECTED[*]}"
     local sum5 sum7
     if [ "$na5" = 1 ]; then sum5="n/a"; else sum5="${pct5}% (${h5})"; fi
     if [ "$na7" = 1 ]; then sum7="n/a"; else sum7="${pct7}% (${h7})"; fi
     record_success || echo "WARN: meters updated, but couldn't record Codex freshness in $USAGE_STATE_DIR" >&2
     echo "updated: ${LABEL_CX5H}=${sum5}  ${LABEL_CX7D}=${sum7}"
-    return
+    # Data flowed, so freshness is stamped above; a missing sentinel for a LIVE
+    # window is still an error, just one that no longer costs the other meter.
+    [ "${#MISSING[@]}" -gt 0 ] && die "no sentinel workspace for: ${MISSING[*]} — create it: ~/bin/cmux-sentinel-setup.sh"
+    return 0
   fi
 
   die "unknown mode: $mode (use --print | --raw | --raw-full | --update | --buckets | --status)"

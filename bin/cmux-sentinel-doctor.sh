@@ -149,14 +149,44 @@ age_label() { # $1=seconds
   else printf '%ds' "$age"; fi
 }
 
+# A freshness stamp says a poller STOPPED succeeding; it can't say why. launchd
+# already captured the reason — the plist's StandardErrorPath holds the poller's own
+# "ERR: …" line — so read it back instead of leaving the user to guess. Without this
+# a stale meter's only advice is "run --update", which just reproduces the failure
+# in a terminal (and for a keychain/socket problem may not even reproduce it).
+poller_err_log() { # $1 = launchd job label — prints the log path, or nothing
+  local plist="$HOME/Library/LaunchAgents/$1.plist" path=""
+  [ -f "$plist" ] || return 0
+  if have plutil; then
+    path=$(plutil -extract StandardErrorPath raw -o - "$plist" 2>/dev/null)
+  fi
+  # Fallback (and the Linux/CI path): the plists we generate are plain XML.
+  [ -n "$path" ] || path=$(grep -A1 '>StandardErrorPath<' "$plist" 2>/dev/null \
+    | sed -n 's:.*<string>\(.*\)</string>.*:\1:p' | head -1)
+  [ -n "$path" ] && [ -f "$path" ] && printf '%s' "$path"
+}
+
+last_poller_error() { # $1 = launchd job label — prints the newest error line
+  local log line
+  log=$(poller_err_log "$1")
+  [ -n "$log" ] || return 0
+  # The poller's own messages are "ERR: …"; prefer those over curl/tool chatter.
+  line=$(grep -a 'ERR:' "$log" 2>/dev/null | tail -1)
+  [ -n "$line" ] || line=$(grep -av '^[[:space:]]*$' "$log" 2>/dev/null | tail -1)
+  # One line, bounded — a log line is untrusted text that must not wreck the report.
+  printf '%.200s' "$line"
+}
+
 # Poller loaded != poller succeeding. Each provider atomically records the epoch
 # after its complete --update; this catches a launchd job that silently stopped or
 # has failed for multiple intervals. Advisory only: stale data does not break wiring.
-check_usage_freshness() { # $1=provider  $2=poller filename
-  local provider="$1" script="$2" stamp="$usage_state_dir/$1.last-success" now saved age
+check_usage_freshness() { # $1=provider  $2=poller filename  $3=launchd job label
+  local provider="$1" script="$2" job="${3:-}" stamp="$usage_state_dir/$1.last-success" now saved age reason
   [ "$stale_after" -gt 0 ] || return 0
   if [ ! -f "$stamp" ]; then
     warn "$provider data freshness unknown — no successful update recorded; run: ~/bin/$script --update"
+    reason=$([ -n "$job" ] && last_poller_error "$job")
+    [ -n "$reason" ] && note "last poller error: $reason"
     return
   fi
   IFS= read -r saved < "$stamp" || saved=""
@@ -168,6 +198,8 @@ check_usage_freshness() { # $1=provider  $2=poller filename
     warn "$provider freshness stamp is in the future — check the system clock, then run: ~/bin/$script --update"
   elif [ "$age" -gt "$stale_after" ]; then
     warn "$provider data stale (last successful update $(age_label "$age") ago; expected within $(age_label "$stale_after")) — run: ~/bin/$script --update"
+    reason=$([ -n "$job" ] && last_poller_error "$job")
+    [ -n "$reason" ] && note "last poller error: $reason"
   else
     [ "$age" -lt 0 ] && age=0
     ok "$provider data fresh (updated $(age_label "$age") ago)"
@@ -185,7 +217,7 @@ if claude_installed; then claude_inst=1; else claude_inst=0; fi
 if [ "$claude_on" = 1 ] && [ "$claude_inst" = 1 ]; then
   ok "claude: installed + enabled → meters active"
   check_launchd_job "claude" "com.cmux-claude-usage"
-  check_usage_freshness "claude" "cmux-claude-usage.sh"
+  check_usage_freshness "claude" "cmux-claude-usage.sh" "com.cmux-claude-usage"
 elif [ "$claude_on" = 1 ]; then
   warn "claude: enabled but NOT installed here — poller exits cleanly; any existing sentinels remain until closed"
 else
@@ -201,7 +233,7 @@ if have cmux && have jq; then
       if [ "$claude_on" = 1 ] && [ "$claude_inst" = 1 ]; then ok "'$lbl' sentinel present ($where)"
       else warn "'$lbl' sentinel present ($where) but claude is off/uninstalled — close it to hide the panel: $close_cmd"; fi
     else
-      if [ "$claude_on" = 1 ] && [ "$claude_inst" = 1 ]; then warn "no '$lbl' sentinel (title \"$lbl\" or starting \"$lbl \") — create it (see install.sh)"
+      if [ "$claude_on" = 1 ] && [ "$claude_inst" = 1 ]; then warn "no '$lbl' sentinel (title \"$lbl\" or starting \"$lbl \") — create it: $HERE/cmux-sentinel-setup.sh"
       else ok "no '$lbl' sentinel — panel hidden by design (claude off/uninstalled)"; fi
     fi
   done
@@ -221,7 +253,7 @@ if codex_installed; then codex_inst=1; else codex_inst=0; fi
 if [ "$codex_on" = 1 ] && [ "$codex_inst" = 1 ]; then
   ok "codex: ChatGPT login stored + provider enabled"
   check_launchd_job "codex" "com.cmux-codex-usage"
-  check_usage_freshness "codex" "cmux-codex-usage.sh"
+  check_usage_freshness "codex" "cmux-codex-usage.sh" "com.cmux-codex-usage"
 elif [ "$codex_on" = 1 ]; then
   warn "codex: enabled but NOT installed here — poller exits cleanly; any existing sentinels remain until closed"
 elif [ "$codex_inst" = 1 ]; then
@@ -293,7 +325,7 @@ if have cmux && have jq; then
     elif [ "$codex_on" = 1 ] && [ "$codex_inst" = 1 ]; then
       if [ "$cx_status" = "unknown" ]; then note "no '$lbl' sentinel — capability unknown, so the doctor is retaining this layout"
       elif [ "$lbl_live" = 0 ]; then ok "no '$lbl' sentinel — correct, your plan has no such window"
-      else warn "no '$lbl' sentinel (title \"$lbl\" or starting \"$lbl \") — create it (see install.sh)"; fi
+      else warn "no '$lbl' sentinel (title \"$lbl\" or starting \"$lbl \") — create it: $HERE/cmux-sentinel-setup.sh"; fi
     fi
   done
 fi
@@ -312,7 +344,7 @@ if amp_installed; then amp_inst=1; else amp_inst=0; fi
 if [ "$amp_on" = 1 ] && [ "$amp_inst" = 1 ]; then
   ok "amp: installed + enabled → meters active"
   check_launchd_job "amp" "com.cmux-amp-usage"
-  check_usage_freshness "amp" "cmux-amp-usage.sh"
+  check_usage_freshness "amp" "cmux-amp-usage.sh" "com.cmux-amp-usage"
 elif [ "$amp_on" = 1 ]; then
   warn "amp: enabled but NOT installed/logged in here — poller exits cleanly; any existing sentinels remain until closed"
 elif [ "$amp_inst" = 1 ]; then
@@ -340,7 +372,7 @@ if have cmux && have jq; then
       else ok "'$lbl' sentinel present ($where)"; fi
     elif [ "$amp_on" = 1 ] && [ "$amp_inst" = 1 ]; then
       if [ "$lbl_live" = 0 ]; then ok "no '$lbl' sentinel — correct, it isn't metered"
-      else warn "no '$lbl' sentinel (title \"$lbl\" or starting \"$lbl \") — create it (see install.sh)"; fi
+      else warn "no '$lbl' sentinel (title \"$lbl\" or starting \"$lbl \") — create it: $HERE/cmux-sentinel-setup.sh"; fi
     fi
   done
 fi

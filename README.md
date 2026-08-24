@@ -265,7 +265,15 @@ not a sidebar edit, and gives three robustness guarantees:
   isn't installed here (e.g. no Claude credentials in the Keychain *or* `~/.claude/.credentials.json`)
   it **exits 0 silently**, so there is no launchd error spam. It does not delete sentinels: an
   existing panel remains until those workspaces are closed, and doctor calls that out. An *expired*
-  token is different — credentials still exist, so it is treated as transient `⚠ offline`.
+  token is different — credentials still exist, so the meter shows the transient `⚠ auth` marker
+  (only Claude Code refreshes that token; the poller just reads it, so run Claude Code once).
+- **One broken meter can't take the others down.** Sentinels are ordinary workspaces, so one can be
+  closed by accident; the poller paints every sentinel it can still resolve, then reports the missing
+  one and exits non-zero. It still records freshness for what landed — "is data flowing" and "is the
+  meter installed" are separate questions, and the doctor answers the second one by name. A failed
+  fetch is classified rather than guessed at, so the row says `⚠ auth` (401), `⚠ rate limit` (429),
+  `⚠ api down` (5xx) or `⚠ offline` (unreachable), and `~/bin/cmux-sentinel-doctor.sh` replays the
+  poller's own last error out of its launchd log.
 - **You can disable a provider you *do* have installed.** Set `USAGE_PROVIDERS` in
   `~/.config/cmux/usage-sentinels.env` (space-separated; default `claude`). Drop a name to make that
   poller a no-op without unloading launchd; then `cmux workspace close` its sentinels to remove the

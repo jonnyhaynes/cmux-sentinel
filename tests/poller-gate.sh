@@ -31,7 +31,10 @@ case "$1" in
     if [ "$2" = "list" ]; then
       # STUB_BARE=1 → sentinels titled with the BARE label (a freshly-created,
       # never-updated sentinel) to exercise the bootstrap resolve path.
-      if [ -n "${STUB_BARE:-}" ]; then
+      if [ -n "${STUB_NO_5H:-}" ]; then
+        # The 5h sentinel was closed — an ordinary workspace anyone can close.
+        printf '{"workspaces":[{"title":"7d init","ref":"workspace:2"}]}\n'
+      elif [ -n "${STUB_BARE:-}" ]; then
         printf '{"workspaces":[{"title":"5h","ref":"workspace:1"},{"title":"7d","ref":"workspace:2"}]}\n'
       else
         printf '{"workspaces":[{"title":"5h init","ref":"workspace:1"},{"title":"7d init","ref":"workspace:2"}]}\n'
@@ -56,21 +59,31 @@ chmod +x "$ROOT/bin/cmux"
 # file only, so there's no machine-Keychain dependency.
 printf '#!/bin/bash\nexit 1\n' > "$ROOT/bin/security"; chmod +x "$ROOT/bin/security"
 
-# Fake curl: STUB_CURL=ok → emit usage JSON; otherwise fail (simulates offline).
-# Utilization values are injected RAW via STUB_FH/STUB_SH (default 7/42), so tests
-# can feed malformed numbers/strings/null and assert the poller clamps, not crashes.
+# Fake curl: STUB_CURL=ok → emit usage JSON; otherwise fail (simulates a transport
+# error, which is what curl's non-zero exit means). Utilization values are injected
+# RAW via STUB_FH/STUB_SH (default 7/42), so tests can feed malformed numbers/
+# strings/null and assert the poller clamps, not crashes.
+#
+# STUB_HTTP sets the status the poller reads from its `-w '\n%{http_code}'`; an
+# error status also emits a server error BODY, because the poller must classify by
+# code and never let a response body reach a workspace title. STUB_NO_CODE drops the
+# status line entirely — the old-curl path, which must still work off the exit code.
 cat > "$ROOT/bin/curl" <<'FAKE'
 #!/bin/bash
 [ "${STUB_CURL:-fail}" = "ok" ] || exit 1
-if [ -n "${STUB_MISSING_BUCKET:-}" ]; then
-  printf '{"five_hour":{"utilization":7,"resets_at":"2026-06-19T20:00:00Z"}}\n'
-  exit 0
+code="${STUB_HTTP:-200}"
+if [ "$code" != "200" ]; then
+  body='{"error":{"message":"stub error body"}}'
+elif [ -n "${STUB_MISSING_BUCKET:-}" ]; then
+  body='{"five_hour":{"utilization":7,"resets_at":"2026-06-19T20:00:00Z"}}'
+elif [ -n "${STUB_BAD_RESET:-}" ]; then
+  body='{"five_hour":{"utilization":7,"resets_at":null},"seven_day":{"utilization":42,"resets_at":{"unexpected":true}}}'
+else
+  body=$(printf '{"five_hour":{"utilization":%s,"resets_at":"2026-06-19T20:00:00Z"},"seven_day":{"utilization":%s,"resets_at":"2026-06-25T00:00:00Z"}}' "${STUB_FH:-7}" "${STUB_SH:-42}")
 fi
-if [ -n "${STUB_BAD_RESET:-}" ]; then
-  printf '{"five_hour":{"utilization":7,"resets_at":null},"seven_day":{"utilization":42,"resets_at":{"unexpected":true}}}\n'
-  exit 0
-fi
-printf '{"five_hour":{"utilization":%s,"resets_at":"2026-06-19T20:00:00Z"},"seven_day":{"utilization":%s,"resets_at":"2026-06-25T00:00:00Z"}}\n' "${STUB_FH:-7}" "${STUB_SH:-42}"
+printf '%s' "$body"
+[ -n "${STUB_NO_CODE:-}" ] || printf '\n%s' "$code"
+exit 0
 FAKE
 chmod +x "$ROOT/bin/curl"
 
@@ -169,6 +182,40 @@ reset
 STUB_CURL="ok" STUB_BARE="1" bash "$POLLER" --update; ckcode "bare-label --update" "$?" 0
 ckhas "bare 5h resolved + renamed" "5h "
 ckhas "bare 7d resolved + renamed" "7d "
+
+echo "T7: a CLOSED sentinel must not freeze the other meter"
+# Regression: the poller wrote 5h first and died on the first failure, so one closed
+# workspace left 7d frozen on whatever it last said — for days, because every
+# 5-minute run aborted in the same place. Freshness tracks DATA (which is flowing);
+# the missing meter is reported separately, and doctor's sentinel check names it.
+reset
+STUB_CURL="ok" STUB_NO_5H=1 bash "$POLLER" --update; ckcode "closed-5h --update" "$?" 1
+ckhas "7d still gets live data while 5h is gone" "7d |42%"
+cknothas "nothing is written for the missing sentinel" "5h |"
+ckprog "7d native progress still lands" "PROG 0.42"
+ckstamp "a meter that landed still counts as fresh data"
+
+echo "T8: HTTP failures are classified, never guessed at"
+reset
+STUB_CURL="ok" STUB_HTTP=401 bash "$POLLER" --update; ckcode "401 --update" "$?" 1
+ckhas "401 marks the meters ⚠ auth" "⚠ auth"
+cknothas "an error response body never reaches a title" "stub error body"
+cknostamp "an auth failure is not a successful refresh"
+reset
+STUB_CURL="ok" STUB_HTTP=429 bash "$POLLER" --update; ckcode "429 --update" "$?" 1
+ckhas "429 marks the meters ⚠ rate limit" "⚠ rate limit"
+reset
+STUB_CURL="ok" STUB_HTTP=503 bash "$POLLER" --update; ckcode "503 --update" "$?" 1
+ckhas "5xx marks the meters ⚠ api down" "⚠ api down"
+reset
+STUB_CURL="fail" bash "$POLLER" --update >/dev/null 2>&1
+ckhas "a transport failure stays ⚠ offline" "⚠ offline"
+
+echo "T9: a response with no -w status line still parses (old curl / proxy)"
+reset
+STUB_CURL="ok" STUB_NO_CODE=1 bash "$POLLER" --update; ckcode "no-status-line --update" "$?" 0
+ckhas "body-only response still paints 5h" "5h |7%"
+ckhas "body-only response still paints 7d" "7d |42%"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
