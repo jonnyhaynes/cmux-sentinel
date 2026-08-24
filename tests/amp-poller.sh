@@ -203,7 +203,7 @@ has "title carries the used pct"    "$renames" "77%"
 has "title compacts the reset"      "$renames" "12d"
 hasnt "title omits the long reset"  "$renames" "12 days"
 has "title has a unicode bar"       "$renames" "█"
-has "77% used gets the amber dot"   "$renames" "🟡"
+hasnt "77% used paints no amber emoji dot" "$renames" "🟡"
 has "fallback title uses the detail/bar delimiter" "$renames" "|"
 is  "progress fraction is 0..1"     "$(head -1 "$ROOT/.progress" | cut -d' ' -f1)" "0.77"
 has "native label uses compact parenthesized countdown" "$(head -1 "$ROOT/.progress")" "77% (12d)"
@@ -211,11 +211,11 @@ hasnt "native label omits redundant resets wording" "$(head -1 "$ROOT/.progress"
 if [ -s "$STAMP" ] && grep -Eq '^[0-9]+$' "$STAMP"; then ok "complete update records freshness"
 else bad "complete update records freshness (no valid stamp)"; fi
 
-# Severity thresholds ride USED, so a nearly-exhausted allowance goes red.
+# Severity rides USED, but is conveyed by the sidebar's label colour, not an emoji dot.
 CRIT='Subscription X: 3% other usage and 100% orb usage remaining - resets upon renewal in 2 days'
 reset_logs
 AMP_FIXTURE="$CRIT" run --update >/dev/null
-has "97% used gets the red dot" "$(cat "$ROOT/.renames")" "🔴"
+hasnt "97% used paints no red emoji dot" "$(cat "$ROOT/.renames")" "🔴"
 
 echo "amp-poller: the orb meter costs a ⌘ key, so it is opt-in"
 
