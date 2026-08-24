@@ -245,12 +245,129 @@ func meterWindow(_ w) -> String {   // human label; title anchor remains unchang
   if w.title.hasPrefix("ampo ") { return "orbs" }
   return "usage"
 }
-func meterTint(_ w) -> String {     // color-from-data: red ≥90%, amber ≥70%, else blue
+func meterTint(_ w) -> String {
+  // Bar colour is BRAND identity: Command Code = brand purple, Claude = amber-orange.
+  // Severity still reads via the 🟡/🔴 dot the poller appends to the title. Other
+  // providers keep the by-value tint (blue → amber ≥70% → red ≥90%).
+  if isCommandCodeMeter(w) { return "#A599E9" }
+  if isClaudeMeter(w) { return "#FFCC66" }
   if hasProgress(w) {
     if w.progress.value >= 0.9 { return "#F28779" }
     if w.progress.value >= 0.7 { return "#FFCC66" }
   }
   return "#73D0FF"
+}
+// Severity colour for the meter's LABEL text (the "39% (19h 4m)" line): red ≥90%,
+// amber ≥70%, else the normal dim grey. This REPLACES the 🔴/🟡 emoji dot the poller
+// used to append — the numbers themselves now carry the warning, so a maxed meter
+// reads red without an extra glyph. Falls back to dim when progress is absent.
+// Severity colour for the meter's LABEL text. In practice the sidebar renders meters
+// via the FALLBACK path (progress is transient and null at render time — see the
+// cheatsheet), so severity must be read from the label STRING, not w.progress.value.
+// meterSeverityText takes the "<pct>% (…)" detail; red ≥90%, amber ≥70%, else dim.
+// Digit-prefix match because the interpreter has no int parse: 90–99% and 100% are
+// red; 70–89% amber; a bare "9%"/"7%" is NOT (the % follows the single digit).
+func meterSeverityColor(_ detail) -> String {
+  if detail.hasPrefix("100%") { return "#F28779" }
+  if detail.hasPrefix("90%") { return "#F28779" }
+  if detail.hasPrefix("91%") { return "#F28779" }
+  if detail.hasPrefix("92%") { return "#F28779" }
+  if detail.hasPrefix("93%") { return "#F28779" }
+  if detail.hasPrefix("94%") { return "#F28779" }
+  if detail.hasPrefix("95%") { return "#F28779" }
+  if detail.hasPrefix("96%") { return "#F28779" }
+  if detail.hasPrefix("97%") { return "#F28779" }
+  if detail.hasPrefix("98%") { return "#F28779" }
+  if detail.hasPrefix("99%") { return "#F28779" }
+  if detail.hasPrefix("70%") { return "#FFCC66" }
+  if detail.hasPrefix("71%") { return "#FFCC66" }
+  if detail.hasPrefix("72%") { return "#FFCC66" }
+  if detail.hasPrefix("73%") { return "#FFCC66" }
+  if detail.hasPrefix("74%") { return "#FFCC66" }
+  if detail.hasPrefix("75%") { return "#FFCC66" }
+  if detail.hasPrefix("76%") { return "#FFCC66" }
+  if detail.hasPrefix("77%") { return "#FFCC66" }
+  if detail.hasPrefix("78%") { return "#FFCC66" }
+  if detail.hasPrefix("79%") { return "#FFCC66" }
+  if detail.hasPrefix("80%") { return "#FFCC66" }
+  if detail.hasPrefix("81%") { return "#FFCC66" }
+  if detail.hasPrefix("82%") { return "#FFCC66" }
+  if detail.hasPrefix("83%") { return "#FFCC66" }
+  if detail.hasPrefix("84%") { return "#FFCC66" }
+  if detail.hasPrefix("85%") { return "#FFCC66" }
+  if detail.hasPrefix("86%") { return "#FFCC66" }
+  if detail.hasPrefix("87%") { return "#FFCC66" }
+  if detail.hasPrefix("88%") { return "#FFCC66" }
+  if detail.hasPrefix("89%") { return "#FFCC66" }
+  return "#8A9199"
+}
+// Ring FILL fraction (0..1) for Circle().trim — derived from the label string
+// because progress.value is null at render time. Coarse to the nearest 10% (a 42px
+// ring can't show finer), matched on the leading "<pct>%" of the detail. Falls to a
+// hairline 0.02 so an empty ring still shows a faint tick rather than nothing.
+func meterFrac(_ detail) -> Double {
+  if detail.hasPrefix("100%") { return 1.0 }
+  // Single-digit "N%" first, so "9%" (0.1) isn't mistaken for "9x%" (0.9).
+  if detail.hasPrefix("0%") { return 0.02 }
+  if detail.hasPrefix("1%") { return 0.05 }
+  if detail.hasPrefix("2%") { return 0.05 }
+  if detail.hasPrefix("3%") { return 0.05 }
+  if detail.hasPrefix("4%") { return 0.05 }
+  if detail.hasPrefix("5%") { return 0.08 }
+  if detail.hasPrefix("6%") { return 0.08 }
+  if detail.hasPrefix("7%") { return 0.08 }
+  if detail.hasPrefix("8%") { return 0.1 }
+  if detail.hasPrefix("9%") { return 0.1 }
+  // Now the two-digit tens buckets.
+  if detail.hasPrefix("9") { return 0.9 }
+  if detail.hasPrefix("8") { return 0.85 }
+  if detail.hasPrefix("7") { return 0.75 }
+  if detail.hasPrefix("6") { return 0.65 }
+  if detail.hasPrefix("5") { return 0.55 }
+  if detail.hasPrefix("4") { return 0.45 }
+  if detail.hasPrefix("3") { return 0.35 }
+  if detail.hasPrefix("2") { return 0.25 }
+  if detail.hasPrefix("1") { return 0.15 }
+  return 0.02
+}
+// The reset countdown pulled out of "<pct>% (2d 19h)" → "2d 19h". Splits on "(" and
+// trims the trailing ")". Empty/"—" when there's no parenthesised part.
+func meterReset(_ detail) -> String {
+  let parts = detail.split(separator: "(")
+  if parts.count > 1 {
+    let inner = parts[1].split(separator: ")")
+    if inner.count > 0 { return String(inner[0]) }
+  }
+  return ""
+}
+// Just the "<pct>%" head of the detail (everything before the space) for the ring centre.
+func meterPct(_ detail) -> String {
+  let parts = detail.split(separator: " ")
+  if parts.count > 0 { return String(parts[0]) }
+  return detail
+}
+// Provider brand hue for the ring stroke (scheme B: ring = brand, severity on number).
+func meterBrand(_ w) -> String {
+  if isCommandCodeMeter(w) { return "#A599E9" }
+  if isClaudeMeter(w) { return "#FFCC66" }
+  if isCodexMeter(w) { return "#73D0FF" }
+  return "#8A9199"
+}
+// Short provider tag shown beside each ring.
+func meterProvTag(_ w) -> String {
+  if isCommandCodeMeter(w) { return "CMD CODE" }
+  if isClaudeMeter(w) { return "CLAUDE" }
+  if isCodexMeter(w) { return "CODEX" }
+  if isAmpMeter(w) { return "AMP" }
+  return "USAGE"
+}
+// Progress-path variant (kept for when progress IS present): red ≥90%, amber ≥70%.
+func meterLabelColor(_ w) -> String {
+  if hasProgress(w) {
+    if w.progress.value >= 0.9 { return "#F28779" }
+    if w.progress.value >= 0.7 { return "#FFCC66" }
+  }
+  return "#8A9199"
 }
 // Poller title fallback protocol: "<anchor> |<detail>|<unicode bar>". The space
 // before the first delimiter preserves every existing "<label> " identity match;
@@ -283,7 +400,7 @@ func meterRow(_ w) -> some View {
         Spacer()
         if hasProgressLabel(w) {
           Text(w.progress.label)
-            .font(.system(size: 11, design: .monospaced)).foregroundColor("#8A9199")
+            .font(.system(size: 11, design: .monospaced)).foregroundColor(meterLabelColor(w))
             .lineLimit(1).truncationMode(.tail).multilineTextAlignment(.trailing)
         }
       }
@@ -294,16 +411,47 @@ func meterRow(_ w) -> some View {
           .font(.system(size: 12, design: .monospaced)).foregroundColor("#CCCAC2")
         Spacer()
         Text(meterFallbackDetail(w))
-          .font(.system(size: 11, design: .monospaced)).foregroundColor("#8A9199")
+          .font(.system(size: 11, design: .monospaced)).foregroundColor(meterSeverityColor(meterFallbackDetail(w)))
           .lineLimit(1).truncationMode(.tail).multilineTextAlignment(.trailing)
       }
       if meterFallbackBar(w) != "" {
         Text(meterFallbackBar(w))
-          .font(.system(size: 11, design: .monospaced)).foregroundColor("#73D0FF")
+          .font(.system(size: 11, design: .monospaced)).foregroundColor(meterTint(w))
           .lineLimit(1)
       }
     }
   }
+}
+
+// One ring-gauge cell (scheme B): a brand-hued ring whose FILL fraction comes from
+// the label %, the % shown in the centre coloured by SEVERITY (red ≥90 / amber ≥70 /
+// else dim), and the provider tag + window + reset stacked to its right. Uses the
+// fallback detail string (progress.value is null at render), same source the bars used.
+func meterRing(_ w) -> some View {
+  HStack(spacing: 9) {
+    ZStack {
+      Circle().stroke("#333A48", lineWidth: 4).frame(width: 38, height: 38)
+      Circle().trim(from: 0, to: meterFrac(meterFallbackDetail(w)))
+        .stroke(meterBrand(w), lineWidth: 4).frame(width: 38, height: 38)
+        .rotationEffect(.degrees(-90))
+      Text(meterPct(meterFallbackDetail(w)))
+        .font(.system(size: 10, design: .monospaced)).bold()
+        .foregroundColor(meterSeverityColor(meterFallbackDetail(w)))
+    }
+    VStack(alignment: .leading, spacing: 1) {
+      Text(meterProvTag(w))
+        .font(.system(size: 9, design: .monospaced)).bold().foregroundColor(meterBrand(w))
+      Text(meterWindow(w))
+        .font(.system(size: 11, design: .monospaced)).foregroundColor("#D9D7CE")
+      Text(meterReset(meterFallbackDetail(w)))
+        .font(.system(size: 9, design: .monospaced)).foregroundColor("#6E7787").lineLimit(1)
+    }
+    Spacer()
+  }
+  // Each cell fills half the row (maxWidth: .infinity works in this interpreter), so
+  // with two rings per row the second column starts at exactly 50% — the rings align
+  // on a grid instead of packing left.
+  .frame(maxWidth: .infinity, alignment: .leading)
 }
 
 // ── ⌘N shortcut digit ─────────────────────────────────────────────
@@ -498,61 +646,62 @@ VStack(alignment: .leading, spacing: 0) {
   .padding(9)
   Divider()
 
-  // COMMAND CODE USAGE — placed ABOVE the Claude panel (deliberate ordering).
-  // Same component; hidden unless Command Code sentinels exist, so it stays
-  // invisible for users who don't run it. Fed by bin/cmux-commandcode-usage.sh.
-  // Sorted so the short 5h window sits above the weekly one, matching the Claude
-  // panel; match the stable title PREFIX, never a substring.
-  if workspaces.filter { isCommandCodeMeter($0) }.count > 0 {
-    VStack(alignment: .leading, spacing: 6) {
-      Text("COMMAND CODE USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
-      ForEach(workspaces.filter { isCommandCodeMeter($0) }.sorted { $0.title.hasPrefix("cc5h") && !$1.title.hasPrefix("cc5h") }) { w in
-        meterRow(w)
-      }
-    }
-    .padding(9)
-    Divider()
-  }
+  // USAGE — one shared section header for the whole meter cluster, styled like the
+  // WORKSPACES header. A top-level sibling (NOT a wrapper around the panels —
+  // nesting them introduced large gaps in this interpreter). Shown only when at
+  // least one provider has sentinels. Each panel below carries just its brand name.
+  // RING DASHBOARD (scheme B). The USAGE header + every provider's ring row live in
+  // ONE tight VStack(spacing: 4) — a single root child, so the interpreter's
+  // inter-sibling gaps (which padding can't remove) don't open up between the header
+  // and rows or between rows. Each provider is a ROW of two ring gauges (session +
+  // week, side by side): ring fill = brand hue, centre % is severity-coloured
+  // (red ≥90 / amber ≥70). Hidden unless at least one provider has sentinels.
+  if workspaces.filter { isUsageMeter($0) }.count > 0 {
+    VStack(alignment: .leading, spacing: 15) {
+      Text("USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
 
-  // CLAUDE USAGE — one labelled section per provider (same component reused).
-  // Meters sort by WINDOW length (the short 5h/cx5h above the weekly 7d/cx7d), not
-  // by workspace .index — index depends on sentinel creation order and reshuffles
-  // across restarts, which would flip the rows. Match the stable title PREFIX,
-  // never a substring: a weekly countdown can itself contain "5h".
-  if workspaces.filter { isClaudeMeter($0) }.count > 0 {
-    VStack(alignment: .leading, spacing: 6) {
-      Text("CLAUDE USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
-      ForEach(workspaces.filter { isClaudeMeter($0) }.sorted { $0.title.hasPrefix("5h") && !$1.title.hasPrefix("5h") }) { w in
-        meterRow(w)
+      // COMMAND CODE — two rings (session left, week right). cc5h sorted before cc7d.
+      if workspaces.filter { isCommandCodeMeter($0) }.count > 0 {
+        HStack(alignment: .top, spacing: 0) {
+          ForEach(workspaces.filter { isCommandCodeMeter($0) }.sorted { $0.title.hasPrefix("cc5h") && !$1.title.hasPrefix("cc5h") }) { w in
+            meterRing(w)
+          }
+        }
       }
-    }
-    .padding(9)
-    Divider()
-  }
 
-  // CODEX USAGE — same component; hidden unless Codex sentinels exist, so it stays
-  // invisible for Claude-only users. Fed by bin/cmux-codex-usage.sh.
-  if workspaces.filter { isCodexMeter($0) }.count > 0 {
-    VStack(alignment: .leading, spacing: 6) {
-      Text("CODEX USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
-      ForEach(workspaces.filter { isCodexMeter($0) }.sorted { $0.title.hasPrefix("cx5h") && !$1.title.hasPrefix("cx5h") }) { w in
-        meterRow(w)
+      // CLAUDE — two rings (5h left of 7d). Match the PREFIX, never a substring:
+      // a weekly countdown can itself contain "5h".
+      if workspaces.filter { isClaudeMeter($0) }.count > 0 {
+        HStack(alignment: .top, spacing: 0) {
+          ForEach(workspaces.filter { isClaudeMeter($0) }.sorted { $0.title.hasPrefix("5h") && !$1.title.hasPrefix("5h") }) { w in
+            meterRing(w)
+          }
+        }
       }
-    }
-    .padding(9)
-    Divider()
-  }
 
-  // AMP USAGE — same component; hidden unless Amp sentinels exist. Fed by
-  // bin/cmux-amp-usage.sh. Sorted so "ampu" (the allowance everyone has) sits
-  // above the opt-in "ampo"; both are monthly, so there's no window length to
-  // sort by — `.contains("ampu")` is the equivalent stable key.
-  if workspaces.filter { isAmpMeter($0) }.count > 0 {
-    VStack(alignment: .leading, spacing: 6) {
-      Text("AMP USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
-      ForEach(workspaces.filter { isAmpMeter($0) }.sorted { $0.title.contains("ampu") && !$1.title.contains("ampu") }) { w in
-        meterRow(w)
+      // CODEX — hidden unless Codex sentinels exist. Fed by bin/cmux-codex-usage.sh.
+      if workspaces.filter { isCodexMeter($0) }.count > 0 {
+        HStack(alignment: .top, spacing: 0) {
+          ForEach(workspaces.filter { isCodexMeter($0) }.sorted { $0.title.hasPrefix("cx5h") && !$1.title.hasPrefix("cx5h") }) { w in
+            meterRing(w)
+          }
+        }
       }
+
+      // AMP — hidden unless Amp sentinels exist. Fed by bin/cmux-amp-usage.sh.
+      if workspaces.filter { isAmpMeter($0) }.count > 0 {
+        HStack(alignment: .top, spacing: 0) {
+          ForEach(workspaces.filter { isAmpMeter($0) }.sorted { $0.title.contains("ampu") && !$1.title.contains("ampu") }) { w in
+            meterRing(w)
+          }
+        }
+      }
+
+      // Bottom breathing room before the divider. Adds ON TOP of the VStack's 15px
+      // gap, so the space below the last ring row is a touch more than the row-to-row
+      // gap — tuned by this height (done here, not via chained .padding on the cluster,
+      // which compounds and inflates every edge in this interpreter).
+      Rectangle().fill("#1F2430").frame(height: 0)
     }
     .padding(9)
     Divider()

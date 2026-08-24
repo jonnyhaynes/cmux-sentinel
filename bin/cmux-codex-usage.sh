@@ -440,13 +440,10 @@ to_pct() { # $1 = raw numeric value
 # sanitized int from to_pct, so argjson is safe; guard to 0 otherwise.
 to_frac() { jq -rn --argjson p "${1:-0}" '$p / 100' 2>/dev/null || printf '0'; }
 
-# Amber/red dot only when a limit is getting close (TRAILS the bar so the title
-# still starts with the label that resolve_ref + the sidebar anchor on).
-sev_dot() {
-  local p="${1:-0}"
-  if [ "$p" -ge 90 ]; then printf ' 🔴'
-  elif [ "$p" -ge 70 ]; then printf ' 🟡'; fi
-}
+# Severity is now conveyed by COLOURING the sidebar label text (red ≥90%, amber
+# ≥70%) — see meterLabelColor() in sidebars/workspaces.swift — so the poller no
+# longer appends a 🔴/🟡 emoji dot. Kept as a no-op so callers are unchanged.
+sev_dot() { :; }
 
 # Best-effort: stamp both sentinels offline so a frozen bar is obvious, and drop the
 # native bar so the "⚠ offline" title shows through. Needs the socket; no-ops if it
