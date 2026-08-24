@@ -235,12 +235,11 @@ make_bar() {
   printf '%s' "$bar"
 }
 
-# Severity dot for the title — amber ≥70%, red ≥90%, nothing below. Trails the bar.
-sev_dot() {
-  local p="${1:-0}"
-  if [ "$p" -ge 90 ]; then printf ' 🔴'
-  elif [ "$p" -ge 70 ]; then printf ' 🟡'; fi
-}
+# Severity is now conveyed by COLOURING the sidebar label text (red ≥90%, amber
+# ≥70%) — see meterLabelColor() in sidebars/workspaces.swift — so the poller no
+# longer appends a 🔴/🟡 emoji dot. Kept as a no-op so callers/interpolation are
+# unchanged and the label stays clean text ("94% (2d 19h)").
+sev_dot() { :; }
 
 # used/cap -> clamped integer percent (0-100), rounded, entirely in jq so untrusted
 # API numbers are never interpolated into a shell/awk program. cap<=0 → 0 (an empty
