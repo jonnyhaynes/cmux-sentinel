@@ -176,11 +176,17 @@ read_key() {
 FETCH_OK=0; FETCH_AUTH=2; FETCH_RATE=3; FETCH_SERVER=4; FETCH_NET=5; FETCH_HTTP=6
 
 fetch_credits() { # $1 = api key. Prints body on success; else returns a FETCH_* class.
-  local out rc code body
+  local out rc code body cfg
+  # The API key rides `curl --config` from a 0600 temp file, never argv, so it stays
+  # out of the process list for the duration of the request.
+  cfg=$(mktemp "${TMPDIR:-/tmp}/cmux-commandcode-curl.XXXXXX") || return "$FETCH_NET"
+  printf 'header = "Authorization: Bearer %s"\n' "$1" >"$cfg" || { rm -f "$cfg"; return "$FETCH_NET"; }
+  chmod 600 "$cfg"
   out=$(curl -sS --max-time 15 -w '\n%{http_code}' \
-    -H "Authorization: Bearer $1" \
+    --config "$cfg" \
     -H "Content-Type: application/json" \
     "$API_BASE$CREDITS_PATH" 2>/dev/null); rc=$?
+  rm -f "$cfg"
   code="${out##*$'\n'}"
   case "$code" in
     [0-9][0-9][0-9]) body="${out%$'\n'*}" ;;

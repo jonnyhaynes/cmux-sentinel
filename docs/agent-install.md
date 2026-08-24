@@ -30,7 +30,7 @@ command -v jq   >/dev/null && command -v curl >/dev/null && echo "jq/curl OK"
 ## Step 1 — run the installer (files + bridge + hook wiring)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/oliver-kriska/cmux-sentinel/main/install.sh | WITH_BRIDGE=1 bash
+curl -fsSL https://raw.githubusercontent.com/jonnyhaynes/cmux-sentinel/main/install.sh | WITH_BRIDGE=1 bash
 ```
 
 `WITH_BRIDGE=1` installs the hooks bridge **and auto-wires** the events into

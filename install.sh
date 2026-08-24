@@ -23,7 +23,7 @@ for arg in "$@"; do
   esac
 done
 
-REPO_URL="https://github.com/oliver-kriska/cmux-sentinel.git"
+REPO_URL="https://github.com/jonnyhaynes/cmux-sentinel.git"
 
 # Resolve our own directory. When piped (curl … | bash) there is no file beside
 # us — BASH_SOURCE is empty and the repo files aren't local — so clone to a cache

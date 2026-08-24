@@ -64,11 +64,11 @@ ckn "0% → no full cell"    "$(line "$out" 5h)" "█"
 ckq "100% → full bar"      "$(line "$out" 7d)" "█"
 ckn "100% → no track"      "$(line "$out" 7d)" "░"
 
-echo "C: severity dots"
+echo "C: severity is conveyed by colour, not emoji dots"
 mk_stub "$CL" "5h  95%  · resets 1h0m|7d  75%  · resets 1d0h" CL_MODE
 out=$(run)
-ckq "≥90% → red"    "$out" "5h.*🔴"
-ckq "≥70% → amber"  "$out" "7d.*🟡"
+ckn "≥90% → no red emoji"    "$out" "🔴"
+ckn "≥70% → no amber emoji"  "$out" "🟡"
 
 echo "D: gating + offline"
 mk_stub "$CL" "x|y" CL_MODE

@@ -55,10 +55,7 @@ make_bar() {
   printf '%s' "$bar"
 }
 
-sev_dot() { # amber ≥70, red ≥90 — nothing below (matches the sidebar)
-  local p="${1:-0}"
-  if [ "$p" -ge 90 ]; then printf ' 🔴'; elif [ "$p" -ge 70 ]; then printf ' 🟡'; fi
-}
+sev_dot() { :; }   # severity is conveyed by the sidebar's label colour, not an emoji dot
 
 # Render one provider section from its poller's `--print`. Prints nothing if the
 # provider is gated off/uninstalled (poller exits 0 with no stdout); prints an

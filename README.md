@@ -7,7 +7,7 @@ workspaces list with live agent states and pluggable **AI usage meters**.
   <img src="assets/sidebar.png" alt="cmux-sentinel sidebar with Claude, Codex, and Amp usage meters plus live agent states" width="320">
 </p>
 
-The top usage panels show live Claude, Codex, and Amp allowances with native progress bars (plus a
+The top usage panels show live Claude, Codex, Command Code, and Amp allowances with native progress bars (plus a
 title fallback) and compact countdowns such as `28% (1h 54m)`. Workspace rows use a quiet state hierarchy: **purple**
 (compacting), **green** (working), **orange** (needs you), selected blue, and neutral idle.
 
@@ -83,7 +83,7 @@ Install cmux-sentinel (a custom cmux sidebar + Claude-Code agent-state bridge +
 AI usage meters) on this Mac for me.
 
 Fetch this guide and follow it exactly, top to bottom:
-https://raw.githubusercontent.com/oliver-kriska/cmux-sentinel/main/docs/agent-install.md
+https://raw.githubusercontent.com/jonnyhaynes/cmux-sentinel/main/docs/agent-install.md
 
 Rules:
 - It's idempotent and backs up anything it changes — do the file edits yourself
@@ -102,15 +102,15 @@ to see exactly what it will run. Prefer to do it by hand? Use the manual steps b
 One-liner — clones to `~/.cache/cmux-sentinel` and runs the installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/oliver-kriska/cmux-sentinel/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jonnyhaynes/cmux-sentinel/main/install.sh | bash
 # also install the working-state hooks AND auto-wire them into ~/.claude/settings.json:
-curl -fsSL https://raw.githubusercontent.com/oliver-kriska/cmux-sentinel/main/install.sh | WITH_BRIDGE=1 bash
+curl -fsSL https://raw.githubusercontent.com/jonnyhaynes/cmux-sentinel/main/install.sh | WITH_BRIDGE=1 bash
 ```
 
 Or clone it yourself:
 
 ```bash
-git clone https://github.com/oliver-kriska/cmux-sentinel.git
+git clone https://github.com/jonnyhaynes/cmux-sentinel.git
 cd cmux-sentinel
 ./install.sh                 # add WITH_BRIDGE=1 to also install + wire the working-state hooks
                              # add --with-zed  (or WITH_ZED=1) for the opt-in Zed integration
@@ -254,7 +254,7 @@ what it replaces.
 
 ```bash
 # curl install — the bootstrap git-pulls ~/.cache/cmux-sentinel, then re-installs:
-curl -fsSL https://raw.githubusercontent.com/oliver-kriska/cmux-sentinel/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jonnyhaynes/cmux-sentinel/main/install.sh | bash
 
 # git clone:
 git -C cmux-sentinel pull && cmux-sentinel/install.sh

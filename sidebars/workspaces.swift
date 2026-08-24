@@ -90,6 +90,13 @@ func needsYou(_ w) -> Bool {
 // base ("<brand> repo · branch"). `.split` keeps the rest intact (spaces and all);
 // cmux trims a leading zero-width space, so a visible marker + strip is the only
 // way to get a clean base.
+//
+// CORRECTNESS NOTE: `parts[0]` here is the text AFTER the glyph only because the
+// interpreter's `.split(separator:)` omits empty subsequences (the empty leading
+// element the marker produces is dropped). If a future build ever switches split to
+// `components(separatedBy:)`-style semantics, parts[0] would be "" and every
+// agent-owned workspace would render an empty title. Any interpreter change that
+// affects `.split` must re-verify this path.
 func titleBase(_ w) -> String {
   if w.title.hasPrefix("⏳") {
     let parts = w.title.split(separator: "⏳")

@@ -218,15 +218,21 @@ read_token() {
 FETCH_OK=0; FETCH_AUTH=2; FETCH_RATE=3; FETCH_SERVER=4; FETCH_NET=5; FETCH_HTTP=6
 
 fetch_usage() { # $1 = token. Prints the body on success; else returns a FETCH_* class.
-  local out rc code body
+  local out rc code body cfg
   # No -f: a 4xx must still yield its STATUS so it can be classified. The body of a
   # failed response is deliberately never printed or logged (same rule as the Codex
-  # poller) — only the code is.
+  # poller) — only the code is. The bearer token rides `curl --config` from a
+  # 0600 temp file, never argv, so it stays out of the process list for the
+  # duration of the request.
+  cfg=$(mktemp "${TMPDIR:-/tmp}/cmux-claude-curl.XXXXXX") || return "$FETCH_NET"
+  printf 'header = "Authorization: Bearer %s"\n' "$1" >"$cfg" || { rm -f "$cfg"; return "$FETCH_NET"; }
+  chmod 600 "$cfg"
   out=$(curl -sS --max-time 15 -w '\n%{http_code}' \
-    -H "Authorization: Bearer $1" \
+    --config "$cfg" \
     -H "anthropic-beta: $OAUTH_BETA" \
     -H "Content-Type: application/json" \
     "$USAGE_ENDPOINT" 2>/dev/null); rc=$?
+  rm -f "$cfg"
   # -w appends the status as the last line; tolerate its absence (an old curl, a
   # test stub) by falling back to the exit status alone rather than misreading the
   # body's last line as a status.
