@@ -40,8 +40,15 @@ secrets:
 
 # docs hygiene: code-fence languages, blank lines around fences (config in
 # .markdownlint.jsonc — line-length & inline-HTML are off by house style).
+#
+# markdownlint-cli is a NODE-VERSION-SCOPED npm global: bump the node pin in a
+# .tool-versions above this repo and the binary silently disappears, so the whole
+# gate dies on a bare `make: *** [markdown] Error 127` that says nothing about what
+# to install. Fall back to npx at CI's pinned version (.github/workflows/ci.yml), and
+# if even that is unavailable, say exactly what to install instead of exiting 127.
+MDLINT_VERSION := 0.47.0
 markdown:
-	markdownlint $(MD)
+	@if command -v markdownlint >/dev/null 2>&1; then 	  echo "markdownlint $(MD)"; markdownlint $(MD); 	elif command -v npx >/dev/null 2>&1; then 	  echo "markdownlint not on PATH (node version switch?) — falling back to npx markdownlint-cli@$(MDLINT_VERSION)"; 	  npx --yes markdownlint-cli@$(MDLINT_VERSION) $(MD); 	else 	  echo "markdownlint-cli@$(MDLINT_VERSION) is missing and npx is unavailable." >&2; 	  echo "  npm install -g markdownlint-cli@$(MDLINT_VERSION)     # per node version" >&2; 	  echo "  mise use -g npm:markdownlint-cli@$(MDLINT_VERSION)    # survives a node switch" >&2; 	  exit 1; 	fi
 
 # state machines: offline, stub cmux/security/curl, run on Linux CI too.
 #   bridge-state  — agent activity markers (⚡/⏳/❓)
