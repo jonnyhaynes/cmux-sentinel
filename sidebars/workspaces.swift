@@ -27,8 +27,14 @@
 func hasPR(_ w) -> Bool {
   return w.pr != nil && w.pr.label != nil && w.pr.label != ""
 }
+// Prefer cmux's native git branch; fall back to the branch packed into the title
+// by cmux-title.sh (plain-terminal workspaces have no native w.branch).
+func branchOf(_ w) -> String {
+  if w.branch != nil && w.branch != "" { return w.branch }
+  return branchFromTitle(w)
+}
 func hasBranch(_ w) -> Bool {
-  return w.branch != nil && w.branch != ""
+  return branchOf(w) != ""
 }
 func hasProgress(_ w) -> Bool {
   return w.progress != nil && w.progress.value != nil
@@ -43,6 +49,11 @@ func hasProgressLabel(_ w) -> Bool {
 // be persistent and precedence-ordered; `progress` reaches the sidebar on 0.64.17
 // but is transient (meters use it — see meterRow). The interpreter's `.hasPrefix`
 // works here (proven), so we detect the marker on the title.
+// STATUS SOURCE = the leading glyph on w.title. The sidebar interpreter can ONLY read
+// w.title (color/description/progress all proved unreadable in this build), so status
+// rides a leading ⚡/⏳/❓ the bridge paints. `titleBase` strips it from the visible
+// row; the WINDOW TITLEBAR is pointed at {activeDirectory} so the glyph never shows
+// there. Titles are "<glyph?><brand> repo · branch".
 func isWorking(_ w) -> Bool {
   return w.title.hasPrefix("⚡")
 }
@@ -69,11 +80,17 @@ func needsYou(_ w) -> Bool {
   if isWorking(w) { return false }
   return w.unread > 0
 }
-// Show working by COLOR, not the glyph: strip the leading "⚡" marker from the
-// displayed title. `.split` keeps the rest of the name intact (spaces and all);
+// cmux-title.sh writes the HUMAN-READABLE title "<brand> repo · branch" so it reads
+// cleanly in the macOS window titlebar (which shows the raw title verbatim). We parse
+// it back apart here: leading brand glyph → agent icon; the rest splits on "·" into
+// repo (title line) + branch (⑂ line). cmux's native w.branch is empty for plain
+// terminals, which is why branch is packed into the title at all.
+
+// Strip the leading activity glyph (⚡/⏳/❓) the bridge paints, returning the raw
+// base ("<brand> repo · branch"). `.split` keeps the rest intact (spaces and all);
 // cmux trims a leading zero-width space, so a visible marker + strip is the only
-// way to get a clean title.
-func displayTitle(_ w) -> String {
+// way to get a clean base.
+func titleBase(_ w) -> String {
   if w.title.hasPrefix("⏳") {
     let parts = w.title.split(separator: "⏳")
     if parts.count > 0 { return String(parts[0]) }
@@ -90,6 +107,62 @@ func displayTitle(_ w) -> String {
     return ""
   }
   return w.title
+}
+
+// Brand GLYPH for the agent that owns the workspace; "" = none (plain terminal or a
+// cmux-native title). Detected as the LEADING glyph of the base. Claude Code writes
+// U+2733 ✳ (the Anthropic mark) into its own titles, so we reuse that exact glyph.
+func agentGlyph(_ w) -> String {
+  let base = titleBase(w)
+  if base.hasPrefix("✳") { return "✳" }   // Claude Code — Anthropic eight-spoked asterisk
+  if base.hasPrefix("⌘") { return "⌘" }   // Command Code
+  if base.hasPrefix("◇") { return "◇" }   // Codex
+  return ""
+}
+
+// Base with the leading brand glyph (and its trailing space) removed → "repo · branch".
+func titleAfterBrand(_ w) -> String {
+  let base = titleBase(w)
+  let g = agentGlyph(w)
+  if g == "" { return base }
+  // Strip glyph, then split on ✳/⌘/◇ dropped a leading space too; rebuild by
+  // splitting on the glyph and taking the remainder, trimming one leading space.
+  let parts = base.split(separator: g)
+  if parts.count > 0 {
+    var rest = String(parts[0])
+    if rest.hasPrefix(" ") { rest = String(rest.dropFirst()) }
+    return rest
+  }
+  return base
+}
+
+// Repo = the row TITLE = text before the "·". When there's no separator the whole
+// (post-brand) string IS the repo name.
+func repoFromTitle(_ w) -> String {
+  let s = titleAfterBrand(w)
+  let parts = s.split(separator: "·")
+  if parts.count > 0 {
+    var r = String(parts[0])
+    if r.hasSuffix(" ") { r = String(r.dropLast()) }
+    return r
+  }
+  return s
+}
+// Branch = the ⑂ line = text after the "·", or "" when absent.
+func branchFromTitle(_ w) -> String {
+  let s = titleAfterBrand(w)
+  let parts = s.split(separator: "·")
+  if parts.count > 1 {
+    var b = String(parts[1])
+    if b.hasPrefix(" ") { b = String(b.dropFirst()) }
+    return b
+  }
+  return ""
+}
+
+// Row title = repo name only. Branch rides its own ⑂ line below (dimension 2).
+func displayTitle(_ w) -> String {
+  return repoFromTitle(w)
 }
 func workLabel(_ w) -> String {
   if hasProgressLabel(w) { return w.progress.label }
@@ -150,7 +223,7 @@ func repoText(_ w) -> String {
     let stale = w.pr.stale == true ? " · stale" : ""
     return "\(w.pr.label)\(stale)"
   }
-  if hasBranch(w) { return w.branch }
+  if hasBranch(w) { return branchOf(w) }
   return ""   // dirty-only row: just the branch icon + the yellow "*"
 }
 // Branch / PR label colour. Dirty no longer tints this (the yellow "*" carries it).
@@ -524,9 +597,12 @@ func row(_ w) -> some View {
           .frame(width: 20)
         VStack(alignment: .leading, spacing: 2) {
           HStack(spacing: 5) {
+            if agentGlyph(w) != "" {
+              Text(agentGlyph(w)).font(.system(size: 12)).foregroundColor("#8A9199")
+            }
             Text(displayTitle(w))
               .font(.system(size: 14, design: .monospaced))
-              .fontWeight(w.selected ? .bold : .medium)
+              .fontWeight(.medium)
               .foregroundColor(w.selected ? "#FFFFFF" : "#D9D7CE")
               .lineLimit(titleLineLimit(w)).multilineTextAlignment(.leading)
             if w.pinned {

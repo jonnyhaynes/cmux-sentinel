@@ -12,6 +12,7 @@
 SHELL   := bash
 SCRIPTS := bin/cmux-claude-usage.sh bin/cmux-codex-usage.sh bin/cmux-amp-usage.sh bin/cmux-sentinel-doctor.sh \
            bin/cmux-sentinel-setup.sh bin/cmux-sidebar-live-smoke.sh bin/cmux-group-sync.sh hooks/cmux-bridge.sh \
+           hooks/cmux-title.sh \
            install.sh scripts/check-secrets.sh \
            hooks/zed-bridge.sh bin/cmux-open-in-zed.sh bin/zed-usage-tui.sh \
            tests/bridge-state.sh tests/poller-gate.sh tests/codex-poller.sh \
