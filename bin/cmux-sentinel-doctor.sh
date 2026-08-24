@@ -377,6 +377,47 @@ if have cmux && have jq; then
   done
 fi
 
+# Command Code provider — same installed × enabled × sentinel cross-check as Claude.
+# Rolling 5h/weekly windows that always both exist on the plan, so (unlike Codex/Amp)
+# there's no dropped-window nuance: available ⇔ auth.json carries an apiKey. Existence
+# only — the key is never read here, so no secret leaks through the doctor. A REVOKED
+# key still has the file, so it stays a transient offline, never a false "uninstalled".
+lblcc5="${SENTINEL_CC5H_LABEL:-cc5h}"; lblcc7="${SENTINEL_CC7D_LABEL:-cc7d}"
+commandcode_installed() {
+  local f="${COMMANDCODE_AUTH_JSON:-$HOME/.commandcode/auth.json}"
+  [ -f "$f" ] || return 1
+  have jq && [ -n "$(jq -r '.apiKey // empty' "$f" 2>/dev/null)" ]
+}
+case " $providers " in *" commandcode "*) cc_on=1 ;; *) cc_on=0 ;; esac
+if commandcode_installed; then cc_inst=1; else cc_inst=0; fi
+
+if [ "$cc_on" = 1 ] && [ "$cc_inst" = 1 ]; then
+  ok "commandcode: installed + enabled → meters active"
+  check_launchd_job "commandcode" "com.cmux-commandcode-usage"
+  check_usage_freshness "commandcode" "cmux-commandcode-usage.sh" "com.cmux-commandcode-usage"
+elif [ "$cc_on" = 1 ]; then
+  warn "commandcode: enabled but NOT installed here (no ~/.commandcode/auth.json with an apiKey) — poller exits cleanly; any existing sentinels remain until closed"
+elif [ "$cc_inst" = 1 ]; then
+  ok "commandcode: installed but not enabled — add it to USAGE_PROVIDERS (\"commandcode claude\") to show its meters"
+else
+  ok "commandcode: not installed and not enabled — nothing to do"
+fi
+
+if have cmux && have jq; then
+  for lbl in "$lblcc5" "$lblcc7"; do
+    rw="$(resolve_ref "$lbl")"; IFS=$'\t' read -r ref ref_win <<<"$rw"
+    where="$ref"; [ -n "$ref_win" ] && where="$where in window $ref_win"
+    close_cmd="$(close_hint "$ref" "$ref_win")"
+    if [ -n "$ref" ]; then
+      if [ "$cc_on" = 1 ] && [ "$cc_inst" = 1 ]; then ok "'$lbl' sentinel present ($where)"
+      else warn "'$lbl' sentinel present ($where) but commandcode is off/uninstalled — close it to hide the panel: $close_cmd"; fi
+    else
+      if [ "$cc_on" = 1 ] && [ "$cc_inst" = 1 ]; then warn "no '$lbl' sentinel (title \"$lbl\" or starting \"$lbl \") — create it: $HERE/cmux-sentinel-setup.sh"
+      else ok "no '$lbl' sentinel — panel hidden by design (commandcode off/uninstalled)"; fi
+    fi
+  done
+else warn "cmux or jq unavailable — can't check Command Code sentinels"; fi
+
 # ── ⌘N shortcut layout ────────────────────────────────────────────────────────
 # Mirrors cmux's WorkspaceShortcutMapper: ⌘1…⌘8 select positions 0…7, and ⌘9 ALWAYS
 # selects the LAST row (count-1) — so positions 8…count-2 are the "keyless band".
@@ -395,7 +436,7 @@ fi
 # drag-reordering; see CLAUDE.md.)
 echo "• ⌘N shortcut layout"
 if have cmux && have jq; then
-  lay_labels="$(printf '%s\n' "$lbl5" "$lbl7" "$lblcx5" "$lblcx7" "$lblampu" "$lblampo" | jq -R . | jq -s .)"
+  lay_labels="$(printf '%s\n' "$lbl5" "$lbl7" "$lblcc5" "$lblcc7" "$lblcx5" "$lblcx7" "$lblampu" "$lblampo" | jq -R . | jq -s .)"
   # The rows cmux actually numbers for ⌘1…⌘9 — kept identical to the copy in
   # bin/cmux-sentinel-setup.sh (setup parks by it, the doctor reports drift off it).
   # Since 0.64.22 (#9176) ⌘N indexes the ORDINARY sidebar rows, so a group ANCHOR

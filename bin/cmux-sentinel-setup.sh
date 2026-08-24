@@ -31,6 +31,7 @@ SENTINELS_ENV="$CFG/usage-sentinels.env"
 # shellcheck disable=SC1090
 [ -f "$SENTINELS_ENV" ] && . "$SENTINELS_ENV"
 LABEL_5H="${SENTINEL_5H_LABEL:-5h}";   LABEL_7D="${SENTINEL_7D_LABEL:-7d}"
+LABEL_CC5H="${SENTINEL_CC5H_LABEL:-cc5h}"; LABEL_CC7D="${SENTINEL_CC7D_LABEL:-cc7d}"
 LABEL_CX5H="${SENTINEL_CX5H_LABEL:-cx5h}"; LABEL_CX7D="${SENTINEL_CX7D_LABEL:-cx7d}"
 LABEL_AMPU="${SENTINEL_AMPU_LABEL:-ampu}"; LABEL_AMPO="${SENTINEL_AMPO_LABEL:-ampo}"
 PROVIDERS="${USAGE_PROVIDERS:-claude}"
@@ -77,6 +78,7 @@ ensure() { # $1 = label  $2 = description
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODEX_POLLER="${CODEX_POLLER:-$SELF_DIR/cmux-codex-usage.sh}"
 AMP_POLLER="${AMP_POLLER:-$SELF_DIR/cmux-amp-usage.sh}"
+COMMANDCODE_POLLER="${COMMANDCODE_POLLER:-$SELF_DIR/cmux-commandcode-usage.sh}"
 
 live_buckets() { # $1 = poller path — echoes live labels, or nothing if undeterminable
   [ -x "$1" ] || return 0
@@ -92,6 +94,14 @@ ensure_live() { # $1 = label  $2 = description  $3 = live labels ("" = undetermi
 }
 
 echo "cmux-sentinel setup — providers: $PROVIDERS"
+# Command Code — rolling 5h/weekly windows like Claude (used/cap from the billing
+# endpoint). Fails open like Codex: an empty --buckets answer keeps both modeled
+# windows rather than silently dropping a meter.
+case " $PROVIDERS " in *" commandcode "*)
+  cc_live=$(live_buckets "$COMMANDCODE_POLLER")
+  ensure_live "$LABEL_CC5H" "Command Code 5-hour rate meter — managed by cmux-commandcode-usage.sh; leave idle" "$cc_live"
+  ensure_live "$LABEL_CC7D" "Command Code weekly rate meter — managed by cmux-commandcode-usage.sh; leave idle" "$cc_live"
+  ;; esac
 case " $PROVIDERS " in *" claude "*)
   ensure "$LABEL_5H" "Claude 5-hour rate meter — managed by cmux-claude-usage.sh; leave idle"
   ensure "$LABEL_7D" "Claude weekly rate meter — managed by cmux-claude-usage.sh; leave idle"
@@ -140,7 +150,7 @@ case " $PROVIDERS " in *" amp "*)
 # Every label the sidebar hides — including disabled providers' leftovers, which
 # still exist as workspaces and still eat ⌘ keys. Array, not a string: a label is
 # user-configurable and could contain a space.
-ALL_LABELS=("$LABEL_5H" "$LABEL_7D" "$LABEL_CX5H" "$LABEL_CX7D" "$LABEL_AMPU" "$LABEL_AMPO")
+ALL_LABELS=("$LABEL_5H" "$LABEL_7D" "$LABEL_CC5H" "$LABEL_CC7D" "$LABEL_CX5H" "$LABEL_CX7D" "$LABEL_AMPU" "$LABEL_AMPO")
 labels_json() { printf '%s\n' "${ALL_LABELS[@]}" | jq -R . | jq -s .; }
 
 ws_json() { # $1 = window ("" = default)
@@ -250,6 +260,7 @@ esac
 
 echo
 echo "Next — paint the bars and reload:"
+case " $PROVIDERS " in *" commandcode "*) echo "  ~/bin/cmux-commandcode-usage.sh --update"; esac
 case " $PROVIDERS " in *" claude "*) echo "  ~/bin/cmux-claude-usage.sh --update"; esac
 case " $PROVIDERS " in *" codex "*)  echo "  ~/bin/cmux-codex-usage.sh --update"; esac
 case " $PROVIDERS " in *" amp "*)    echo "  ~/bin/cmux-amp-usage.sh --update"; esac

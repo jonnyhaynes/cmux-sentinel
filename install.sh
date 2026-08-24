@@ -197,6 +197,9 @@ echo "  -> ~/bin/cmux-codex-usage.sh  (opt-in: add 'codex' to USAGE_PROVIDERS)"
 bak "$HOME/bin/cmux-amp-usage.sh" "$here/bin/cmux-amp-usage.sh"
 install -m 0755 "$here/bin/cmux-amp-usage.sh" "$HOME/bin/cmux-amp-usage.sh"
 echo "  -> ~/bin/cmux-amp-usage.sh  (opt-in: add 'amp' to USAGE_PROVIDERS)"
+bak "$HOME/bin/cmux-commandcode-usage.sh" "$here/bin/cmux-commandcode-usage.sh"
+install -m 0755 "$here/bin/cmux-commandcode-usage.sh" "$HOME/bin/cmux-commandcode-usage.sh"
+echo "  -> ~/bin/cmux-commandcode-usage.sh  (opt-in: add 'commandcode' to USAGE_PROVIDERS)"
 install -m 0755 "$here/bin/cmux-sentinel-doctor.sh" "$HOME/bin/cmux-sentinel-doctor.sh"
 echo "  -> ~/bin/cmux-sentinel-doctor.sh  (run anytime to health-check the setup)"
 install -m 0755 "$here/bin/cmux-sentinel-setup.sh" "$HOME/bin/cmux-sentinel-setup.sh"
@@ -230,6 +233,9 @@ install_plist "$here/examples/com.cmux-codex-usage.plist" "$cxplist" \
 ampplist="$HOME/Library/LaunchAgents/com.cmux-amp-usage.plist"
 install_plist "$here/examples/com.cmux-amp-usage.plist" "$ampplist" \
   "com.cmux-amp-usage" "Amp poller; dormant unless enabled"
+ccplist="$HOME/Library/LaunchAgents/com.cmux-commandcode-usage.plist"
+install_plist "$here/examples/com.cmux-commandcode-usage.plist" "$ccplist" \
+  "com.cmux-commandcode-usage" "Command Code poller; dormant unless enabled"
 gsplist="$HOME/Library/LaunchAgents/com.cmux-group-sync.plist"
 install_plist "$here/examples/com.cmux-group-sync.plist" "$gsplist" \
   "com.cmux-group-sync" "group sync; dormant unless enabled"
@@ -319,6 +325,7 @@ cat <<'NEXT'
    matching --update commands):
      ~/bin/cmux-claude-usage.sh --print
      ~/bin/cmux-claude-usage.sh --update
+     ~/bin/cmux-commandcode-usage.sh --print && ~/bin/cmux-commandcode-usage.sh --update
      ~/bin/cmux-codex-usage.sh --print && ~/bin/cmux-codex-usage.sh --update
      ~/bin/cmux-amp-usage.sh --print && ~/bin/cmux-amp-usage.sh --update
 
@@ -334,6 +341,7 @@ cat <<'NEXT'
    installer says a loaded plist changed, run its printed bootout + bootstrap
    commands, or re-run `./install.sh --reload-agents` to reload changed jobs only:
      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-claude-usage.plist
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-commandcode-usage.plist
      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-codex-usage.plist
      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-amp-usage.plist
 

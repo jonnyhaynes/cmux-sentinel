@@ -199,7 +199,19 @@ func isAmpMeter(_ w) -> Bool {
   if w.title.hasPrefix("ampo ") { return true }  // Amp — orb usage (opt-in)
   return false
 }
+// Command Code provider — fed by bin/cmux-commandcode-usage.sh, which reads
+// api.commandcode.ai/alpha/billing/credits. Labels distinct from every other
+// provider's ("cc5h "/"cc7d " can't collide with "5h "/"cx5h "/"ampu "). Same
+// rolling-window shape as Claude: "cc5h" = 5-hour window, "cc7d" = weekly window.
+func isCommandCodeMeter(_ w) -> Bool {
+  if w.title == "cc5h" { return true }           // bare bootstrap label
+  if w.title.hasPrefix("cc5h ") { return true }  // Command Code — 5h window
+  if w.title == "cc7d" { return true }           // bare bootstrap label
+  if w.title.hasPrefix("cc7d ") { return true }  // Command Code — weekly window
+  return false
+}
 func isUsageMeter(_ w) -> Bool {
+  if isCommandCodeMeter(w) { return true }
   if isClaudeMeter(w) { return true }
   if isCodexMeter(w) { return true }
   if isAmpMeter(w) { return true }
@@ -215,6 +227,10 @@ func isUsageMeter(_ w) -> Bool {
 // whenever progress is absent (bootstrap, offline-cleared, a dropped write, or
 // the first poll after an app restart).
 func meterWindow(_ w) -> String {   // human label; title anchor remains unchanged
+  if w.title == "cc5h" { return "session" }
+  if w.title.hasPrefix("cc5h ") { return "session" }
+  if w.title == "cc7d" { return "week" }
+  if w.title.hasPrefix("cc7d ") { return "week" }
   if w.title == "5h" { return "session" }
   if w.title.hasPrefix("5h ") { return "session" }
   if w.title == "7d" { return "week" }
@@ -241,6 +257,8 @@ func meterTint(_ w) -> String {     // color-from-data: red ≥90%, amber ≥70%
 // the single-character split avoids provider-specific prefix parsing entirely.
 // Old pre-protocol titles show "refreshing…" until the next poll migrates them.
 func meterFallbackDetail(_ w) -> String {
+  if w.title == "cc5h" { return "waiting…" }
+  if w.title == "cc7d" { return "waiting…" }
   if w.title == "5h" { return "waiting…" }
   if w.title == "7d" { return "waiting…" }
   if w.title == "cx5h" { return "waiting…" }
@@ -479,6 +497,22 @@ VStack(alignment: .leading, spacing: 0) {
   }
   .padding(9)
   Divider()
+
+  // COMMAND CODE USAGE — placed ABOVE the Claude panel (deliberate ordering).
+  // Same component; hidden unless Command Code sentinels exist, so it stays
+  // invisible for users who don't run it. Fed by bin/cmux-commandcode-usage.sh.
+  // Sorted so the short 5h window sits above the weekly one, matching the Claude
+  // panel; match the stable title PREFIX, never a substring.
+  if workspaces.filter { isCommandCodeMeter($0) }.count > 0 {
+    VStack(alignment: .leading, spacing: 6) {
+      Text("COMMAND CODE USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
+      ForEach(workspaces.filter { isCommandCodeMeter($0) }.sorted { $0.title.hasPrefix("cc5h") && !$1.title.hasPrefix("cc5h") }) { w in
+        meterRow(w)
+      }
+    }
+    .padding(9)
+    Divider()
+  }
 
   // CLAUDE USAGE — one labelled section per provider (same component reused).
   // Meters sort by WINDOW length (the short 5h/cx5h above the weekly 7d/cx7d), not

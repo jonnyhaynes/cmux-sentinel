@@ -28,8 +28,9 @@ background pollers. Batteries included, easy to fork and tweak.
   (`GROUP_NAME_SYNC=1`) keeps each group's anchor title in step with the group name (see "Workspace
   group names" below). Off by default; a no-op if you don't use groups.
 - **Usage meters** — provider-labelled native progress bars fed by background pollers. Ships with
-  **Claude Code** (5-hour session + 7-day week), **Codex** (whatever short/weekly windows the account
-  currently reports), and **Amp** (monthly thread allowance plus opt-in orb allowance). The title
+  **Command Code** (5-hour session + weekly window), **Claude Code** (5-hour session + 7-day week),
+  **Codex** (whatever short/weekly windows the account currently reports), and **Amp** (monthly thread
+  allowance plus opt-in orb allowance). The title
   remains a restart-proof anchor and fallback. Providers are opt-in and self-gating: the default
   provider set is **Claude only**, and an unavailable provider's poller exits cleanly. Panels are
   controlled separately by sentinel presence (see "Usage meters" below).
@@ -120,7 +121,7 @@ cd cmux-sentinel
 | Claude states | `--with-bridge` / `WITH_BRIDGE=1` | Installs the shared bridge under `~/.claude/hooks` and registers Claude Code events |
 | Amp states | `--with-amp` / `WITH_AMP=1` | Installs the Amp plugin plus its neutral shared dependency under `~/.config/cmux-sentinel` |
 | Zed | `--with-zed` / `WITH_ZED=1` | Installs and registers the opt-in Zed helpers |
-| Usage providers | `USAGE_PROVIDERS` | Chooses `claude`, `codex`, and/or `amp` meter pollers; default is `claude` |
+| Usage providers | `USAGE_PROVIDERS` | Chooses `commandcode`, `claude`, `codex`, and/or `amp` meter pollers; default is `claude` |
 | Reload changed jobs | `--reload-agents` / `RELOAD_AGENTS=1` | Reloads only launchd jobs whose generated plist changed and is already loaded |
 
 Amp-only installation does **not** register Claude hooks. If both agents are enabled, they still use
