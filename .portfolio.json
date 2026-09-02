@@ -1,4 +1,4 @@
 {
-  "pitch": "cmux-sentinel is an opinionated custom sidebar for cmux — a clean, monospace, Ayu-Mirage workspaces list with live per-agent row states and pluggable AI usage meters (Claude, Codex, Command Code, Amp) shown as native progress bars with compact countdowns.",
-  "challenge": "cmux custom sidebars are sandboxed: they can only read a fixed set of per-workspace fields and can't fetch URLs or read arbitrary data. So live agent state is smuggled through STATIC title markers — reference-counted so co-tenant agents don't stomp each other or strand a dead session — and usage meters are fed by background launchd pollers that write into the same narrow channel."
+  "pitch": "cmux-sentinel is an opinionated custom sidebar for cmux: a monospace workspaces list with live per-agent states and pluggable AI usage meters.",
+  "challenge": "cmux sidebars are sandboxed to a fixed set of fields, so agent state is smuggled through reference-counted title markers and usage meters are fed by background pollers."
 }
