@@ -52,3 +52,5 @@ jobs:
             sed "s#/Users/YOUR_USERNAME#$RUNNER_TEMP/home#g" "$plist" > "$RUNNER_TEMP/plists/$(basename "$plist")"
           done
           plutil -lint "$RUNNER_TEMP"/plists/*.plist
+
+# (touch to trigger first CI run before enabling required-status gate)
