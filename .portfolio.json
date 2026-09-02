@@ -1,0 +1,4 @@
+{
+  "pitch": "cmux-sentinel is an opinionated custom sidebar for cmux: a monospace workspaces list with live per-agent states and pluggable AI usage meters.",
+  "challenge": "cmux sidebars are sandboxed to a fixed set of fields, so agent state is smuggled through reference-counted title markers and usage meters are fed by background pollers."
+}
