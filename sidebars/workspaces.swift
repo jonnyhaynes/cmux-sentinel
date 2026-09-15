@@ -326,13 +326,70 @@ func isZeroSpend(_ w) -> Bool {
   if w.title.hasPrefix("spend |none|") { return true }  // painted, nothing spent
   return false
 }
-// What the CLAUDE USAGE panel actually draws. Split from isClaudeMeter on purpose:
-// a hidden spend row must STILL count as a meter, or it would fall through into the
-// normal workspace list — visible in the one place we didn't want it.
-func isClaudePanelRow(_ w) -> Bool {
-  if isZeroSpend(w) { return false }
+// ── budget vs window ──────────────────────────────────────────────
+// Two kinds of quantity live in the usage cluster and they are NOT the same thing.
+// A WINDOW is a rate limit you race, refilled on a clock (session, week). A BUDGET
+// is an allowance you drift through (extra-usage money). Windows belong in the 2-up
+// ring grid. A budget is ONE reading per provider, and there can be one per
+// provider, so budgets draw as a single compact ring in the USAGE header instead —
+// which is what keeps the grid at exactly two cells however many meters a provider
+// grows. Only Claude has a budget today; a provider that gains one is one line here.
+// A budget hidden for having no reading must STILL count as a meter (isUsageMeter),
+// or it would fall through into the normal workspace list — visible in the one place
+// we did not want it. isZeroSpend filters the CLUSTER; it never touches that list.
+func isBudgetMeter(_ w) -> Bool {
+  if w.title == "spend" { return true }
+  if w.title.hasPrefix("spend ") { return true }
+  return false
+}
+// Claude's ring grid, row 1: the two rolling rate windows.
+func isClaudeWindow(_ w) -> Bool {
+  if isBudgetMeter(w) { return false }
+  if isClaudeModelCap(w) { return false }
   if isClaudeMeter(w) { return true }
   return false
+}
+// Claude's ring grid, row 2: the per-model weekly cap. Still a window, but the grid
+// takes exactly two cells, so a third meter takes its own row rather than squeezing
+// the first two to a third of the width each — which is what broke the 50% grid.
+func isClaudeModelCap(_ w) -> Bool {
+  if w.title == "m7d" { return true }
+  if w.title.hasPrefix("m7d ") { return true }
+  return false
+}
+// Provider order, shared by the cluster rows and the header rings: Command Code,
+// Claude, Codex, Amp — the same order the cluster blocks are written in.
+func providerRank(_ w) -> Int {
+  if isCommandCodeMeter(w) { return 0 }
+  if isClaudeMeter(w) { return 1 }
+  if isCodexMeter(w) { return 2 }
+  if isAmpMeter(w) { return 3 }
+  return 4
+}
+// Position WITHIN a provider's row. The old comparator only pinned the short window
+// first and declared every other pair equivalent; Swift's sort is not stable, so
+// once a provider had three cells the order of the rest was undefined. Rank each
+// label explicitly instead.
+func meterRank(_ w) -> Int {
+  if isCommandCodeMeter(w) {
+    if w.title.hasPrefix("cc5h") { return 0 }
+    return 1
+  }
+  if isClaudeMeter(w) {
+    if w.title.hasPrefix("5h") { return 0 }
+    if w.title.hasPrefix("7d") { return 1 }
+    if w.title.hasPrefix("m7d") { return 2 }
+    return 3
+  }
+  if isCodexMeter(w) {
+    if w.title.hasPrefix("cx5h") { return 0 }
+    return 1
+  }
+  if isAmpMeter(w) {
+    if w.title.hasPrefix("ampu") { return 0 }
+    return 1
+  }
+  return 9
 }
 // Codex provider — same shape as isClaudeMeter, distinct labels so the two never
 // collide. bin/cmux-codex-usage.sh reads ChatGPT account usage and routes windows
@@ -376,14 +433,14 @@ func isUsageMeter(_ w) -> Bool {
   return false
 }
 
-// ── native meter row (progress channel) ───────────────────────────
+// ── meter labels (title channel) ──────────────────────────────────
 // The poller writes each sentinel's utilization via `set-progress` (value 0..1 +
 // a clean label), which cmux 0.64.17 passes to the interpreter (null-until-set —
-// see .claude/research/2026-07-06-conductor-sidebar-analysis.md). So a meter is a
-// NATIVE ProgressView, not a unicode-block bar baked into the title. The title
-// stays the anchor (isClaudeMeter/resolve_ref) AND the fallback shown here
-// whenever progress is absent (bootstrap, offline-cleared, a dropped write, or
-// the first poll after an app restart).
+// see .claude/research/2026-07-06-conductor-sidebar-analysis.md). The title stays
+// the anchor (isClaudeMeter/resolve_ref) AND the source this file actually reads:
+// progress.value is null at render, so meterRing derives its arc and its centre from
+// the title's detail (see meterFallbackDetail). That makes the title the live path
+// rather than a fallback, and it self-heals on the next poll.
 func meterWindow(_ w) -> String {   // human label; title anchor remains unchanged
   if w.title == "cc5h" { return "session" }
   if w.title.hasPrefix("cc5h ") { return "session" }
@@ -423,18 +480,6 @@ func meterWindow(_ w) -> String {   // human label; title anchor remains unchang
   // meter predicate without a name here, which renders an anonymous "usage" row —
   // that is exactly the bug this line is meant to make obvious rather than hide.
   return "usage"
-}
-func meterTint(_ w) -> String {
-  // Bar colour is BRAND identity: Command Code = brand purple, Claude = amber-orange.
-  // Severity still reads via the 🟡/🔴 dot the poller appends to the title. Other
-  // providers keep the by-value tint (blue → amber ≥70% → red ≥90%).
-  if isCommandCodeMeter(w) { return "#A599E9" }
-  if isClaudeMeter(w) { return "#FFCC66" }
-  if hasProgress(w) {
-    if w.progress.value >= 0.9 { return "#F28779" }
-    if w.progress.value >= 0.7 { return "#FFCC66" }
-  }
-  return "#73D0FF"
 }
 // Severity colour for the meter's LABEL text (the "39% (19h 4m)" line): red ≥90%,
 // amber ≥70%, else the normal dim grey. This REPLACES the 🔴/🟡 emoji dot the poller
@@ -540,14 +585,6 @@ func meterProvTag(_ w) -> String {
   if isAmpMeter(w) { return "AMP" }
   return "USAGE"
 }
-// Progress-path variant (kept for when progress IS present): red ≥90%, amber ≥70%.
-func meterLabelColor(_ w) -> String {
-  if hasProgress(w) {
-    if w.progress.value >= 0.9 { return "#F28779" }
-    if w.progress.value >= 0.7 { return "#FFCC66" }
-  }
-  return "#8A9199"
-}
 // Poller title fallback protocol: "<anchor> |<detail>|<unicode bar>". The space
 // before the first delimiter preserves every existing "<label> " identity match;
 // the single-character split avoids provider-specific prefix parsing entirely.
@@ -565,43 +602,6 @@ func meterFallbackDetail(_ w) -> String {
   if parts.count > 1 { return String(parts[1]) }
   return "refreshing…"
 }
-func meterFallbackBar(_ w) -> String {
-  let parts = w.title.split(separator: "|")
-  if parts.count > 2 { return String(parts[2]) }
-  return ""
-}
-func meterRow(_ w) -> some View {
-  VStack(alignment: .leading, spacing: 3) {
-    if hasProgress(w) {
-      HStack(spacing: 6) {
-        Text(meterWindow(w))
-          .font(.system(size: 12, design: .monospaced)).foregroundColor("#CCCAC2")
-        Spacer()
-        if hasProgressLabel(w) {
-          Text(w.progress.label)
-            .font(.system(size: 11, design: .monospaced)).foregroundColor(meterLabelColor(w))
-            .lineLimit(1).truncationMode(.tail).multilineTextAlignment(.trailing)
-        }
-      }
-      ProgressView(value: w.progress.value).tint(meterTint(w))
-    } else {
-      HStack(spacing: 6) {
-        Text(meterWindow(w))
-          .font(.system(size: 12, design: .monospaced)).foregroundColor("#CCCAC2")
-        Spacer()
-        Text(meterFallbackDetail(w))
-          .font(.system(size: 11, design: .monospaced)).foregroundColor(meterSeverityColor(meterFallbackDetail(w)))
-          .lineLimit(1).truncationMode(.tail).multilineTextAlignment(.trailing)
-      }
-      if meterFallbackBar(w) != "" {
-        Text(meterFallbackBar(w))
-          .font(.system(size: 11, design: .monospaced)).foregroundColor(meterTint(w))
-          .lineLimit(1)
-      }
-    }
-  }
-}
-
 // One ring-gauge cell (scheme B): a brand-hued ring whose FILL fraction comes from
 // the label %, the % shown in the centre coloured by SEVERITY (red ≥90 / amber ≥70 /
 // else dim), and the provider tag + window + reset stacked to its right. Uses the
@@ -631,6 +631,42 @@ func meterRing(_ w) -> some View {
   // with two rings per row the second column starts at exactly 50% — the rings align
   // on a grid instead of packing left.
   .frame(maxWidth: .infinity, alignment: .leading)
+}
+
+// The BUDGET cell that rides in the USAGE header: a small brand ring plus the
+// figure, one per provider with a live budget meter. 12px is about the floor for an
+// arc that still reads, and meterFrac's coarse bucketing (~5%) is under a pixel at
+// this diameter — so the arc is a SHAPE, not a measurement. The FIGURE beside it is
+// the reading.
+// Colour follows the big ring cells EXACTLY: the ARC carries the provider's brand hue
+// (identity) and the TEXT carries severity, via the same meterSeverityColor the
+// roundals colour their centre % with — so a budget at 85% reads amber here for the
+// same reason a window at 85% does. Passing the whole detail (not the trimmed figure)
+// is what makes that work: the thresholds read its leading "<pct>%". Severity stays on
+// the text rather than the arc so a provider in trouble remains identifiable.
+func headerRing(_ w) -> some View {
+  ZStack {
+    Circle().stroke("#333A48", lineWidth: 2).frame(width: 12, height: 12)
+    Circle().trim(from: 0, to: meterFrac(meterFallbackDetail(w)))
+      .stroke(meterBrand(w), lineWidth: 2).frame(width: 12, height: 12)
+      .rotationEffect(.degrees(-90))
+  }
+}
+// The figure is the parenthesised half of the meter's detail — the same slot
+// meterReset reads, which for a budget holds money ("£9.98 of £20.00") rather than a
+// reset countdown. It is empty when the poller has painted no detail yet
+// (bootstrap, offline), and then the ring stands alone, which is honest: there is no
+// figure to show. lineLimit(1) because this is the one header element that can
+// outgrow the header — at 9pt the figure is ~80px, so two providers fit comfortably
+// and a third is the point to shorten it (e.g. "£9.98/£20.00").
+func headerBudget(_ w) -> some View {
+  HStack(spacing: 6) {
+    headerRing(w)
+    Text(meterReset(meterFallbackDetail(w)))
+      .font(.system(size: 9, design: .monospaced))
+      .foregroundColor(meterSeverityColor(meterFallbackDetail(w)))
+      .lineLimit(1)
+  }
 }
 
 // ── ⌘N shortcut digit ─────────────────────────────────────────────
@@ -850,38 +886,56 @@ VStack(alignment: .leading, spacing: 0) {
 
   // USAGE — one shared section header for the whole meter cluster, styled like the
   // WORKSPACES header. A top-level sibling (NOT a wrapper around the panels —
-  // nesting them introduced large gaps in this interpreter). Shown only when at
-  // least one provider has sentinels. Each panel below carries just its brand name.
+  // nesting them introduced large gaps in this interpreter).
   // RING DASHBOARD (scheme B). The USAGE header + every provider's ring row live in
-  // ONE tight VStack(spacing: 4) — a single root child, so the interpreter's
-  // inter-sibling gaps (which padding can't remove) don't open up between the header
-  // and rows or between rows. Each provider is a ROW of two ring gauges (session +
-  // week, side by side): ring fill = brand hue, centre % is severity-coloured
-  // (red ≥90 / amber ≥70). Hidden unless at least one provider has sentinels.
-  // A zero-balance "spend" row does NOT count: it keeps its workspace (isUsageMeter,
-  // so it can't leak into the normal list) but is filtered out here, so it can never
-  // leave an empty USAGE header behind.
+  // ONE tight VStack — a single root child, so the interpreter's inter-sibling gaps
+  // (which padding can't remove) don't open up between the header and rows or between
+  // rows. Each provider is a ROW of two ring gauges (session + week, side by side):
+  // ring fill = brand hue, centre % is severity-coloured (red ≥90 / amber ≥70).
+  // TWO CELLS IS THE CONTRACT: the second column must start at exactly 50%, so a
+  // provider with a third meter takes a second row (isClaudeModelCap) rather than
+  // squeezing the first two to a third of the width each.
+  // BUDGETS ride in the header, right-aligned: a small brand ring plus the money
+  // figure, per provider with a live budget meter (isBudgetMeter). One reading per
+  // provider, and no room for it in a two-cell grid. A zero balance has no reading,
+  // so it stays hidden — the only reason a budget cell is ever absent.
   if workspaces.filter { isUsageMeter($0) && !isZeroSpend($0) }.count > 0 {
     VStack(alignment: .leading, spacing: 15) {
-      Text("USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
+      HStack(spacing: 8) {
+        Text("USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
+        Spacer()
+        ForEach(workspaces.filter { isBudgetMeter($0) && !isZeroSpend($0) }.sorted { providerRank($0) < providerRank($1) }) { w in
+          headerBudget(w)
+        }
+      }
 
-      // COMMAND CODE — two rings (session left, week right). cc5h sorted before cc7d.
+      // COMMAND CODE — two rings (session left, week right).
       if workspaces.filter { isCommandCodeMeter($0) }.count > 0 {
         HStack(alignment: .top, spacing: 0) {
-          ForEach(workspaces.filter { isCommandCodeMeter($0) }.sorted { $0.title.hasPrefix("cc5h") && !$1.title.hasPrefix("cc5h") }) { w in
+          ForEach(workspaces.filter { isCommandCodeMeter($0) }.sorted { meterRank($0) < meterRank($1) }) { w in
             meterRing(w)
           }
         }
       }
 
-      // CLAUDE — two rings (5h left of 7d), plus the optional m7d (per-model weekly)
-      // and spend rows, which have no rank of their own and keep workspace order
-      // (setup creates them last). Match the PREFIX, never a substring: a weekly
-      // countdown can itself contain "5h". isClaudePanelRow, not isClaudeMeter: a
-      // zero-balance spend row is still a meter but must not draw (see isZeroSpend).
-      if workspaces.filter { isClaudePanelRow($0) }.count > 0 {
+      // CLAUDE — row 1 is the two rolling rate windows (5h left of 7d); row 2 is the
+      // optional per-model weekly cap. Match the PREFIX, never a substring: a weekly
+      // countdown can itself contain "5h". The extra-usage SPEND meter is NOT drawn
+      // here — it is a budget, so it draws as a header ring (see isBudgetMeter), which
+      // is what keeps this row at exactly two cells and the 50% alignment intact.
+      if workspaces.filter { isClaudeWindow($0) }.count > 0 {
         HStack(alignment: .top, spacing: 0) {
-          ForEach(workspaces.filter { isClaudePanelRow($0) }.sorted { $0.title.hasPrefix("5h") && !$1.title.hasPrefix("5h") }) { w in
+          ForEach(workspaces.filter { isClaudeWindow($0) }.sorted { meterRank($0) < meterRank($1) }) { w in
+            meterRing(w)
+          }
+        }
+      }
+
+      // CLAUDE row 2 — only exists once CLAUDE_MODEL_METER=1 has created the m7d
+      // sentinel. A window like the others, but a third cell cannot share row 1.
+      if workspaces.filter { isClaudeModelCap($0) }.count > 0 {
+        HStack(alignment: .top, spacing: 0) {
+          ForEach(workspaces.filter { isClaudeModelCap($0) }.sorted { meterRank($0) < meterRank($1) }) { w in
             meterRing(w)
           }
         }
@@ -890,7 +944,7 @@ VStack(alignment: .leading, spacing: 0) {
       // CODEX — hidden unless Codex sentinels exist. Fed by bin/cmux-codex-usage.sh.
       if workspaces.filter { isCodexMeter($0) }.count > 0 {
         HStack(alignment: .top, spacing: 0) {
-          ForEach(workspaces.filter { isCodexMeter($0) }.sorted { $0.title.hasPrefix("cx5h") && !$1.title.hasPrefix("cx5h") }) { w in
+          ForEach(workspaces.filter { isCodexMeter($0) }.sorted { meterRank($0) < meterRank($1) }) { w in
             meterRing(w)
           }
         }
@@ -899,7 +953,7 @@ VStack(alignment: .leading, spacing: 0) {
       // AMP — hidden unless Amp sentinels exist. Fed by bin/cmux-amp-usage.sh.
       if workspaces.filter { isAmpMeter($0) }.count > 0 {
         HStack(alignment: .top, spacing: 0) {
-          ForEach(workspaces.filter { isAmpMeter($0) }.sorted { $0.title.contains("ampu") && !$1.title.contains("ampu") }) { w in
+          ForEach(workspaces.filter { isAmpMeter($0) }.sorted { meterRank($0) < meterRank($1) }) { w in
             meterRing(w)
           }
         }
