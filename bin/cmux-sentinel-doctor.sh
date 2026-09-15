@@ -156,6 +156,70 @@ elif [ -f "$amp_plugin" ]; then
   warn "Amp plugin is installed but its shared bridge is missing — re-run: WITH_AMP=1 ./install.sh"
 fi
 
+# ── Command Code: adapter + pane watcher ──────────────────────────────────────
+# Command Code fires only four hook events and NONE of them reports a permission
+# prompt, so its ❓ comes from a detached viewport watcher rather than the event
+# stream. That makes every failure mode here SILENT — an older bridge ignores the
+# event, a dead watcher simply never fires, a missing PostToolUse leaves the ❓
+# pinned — and silent-at-a-distance is exactly the class this report exists for.
+echo "• Command Code (adapter + pane watcher)"
+cc_adapter="$HOME/.claude/hooks/cmux-bridge-commandcode.sh"
+cc_repo="$HERE/../hooks/cmux-bridge-commandcode.sh"
+cc_settings="$HOME/.commandcode/settings.json"
+if [ -f "$cc_adapter" ]; then
+  ok "adapter installed at ~/.claude/hooks/cmux-bridge-commandcode.sh"
+  if [ -f "$cc_repo" ]; then
+    if diff -q "$cc_repo" "$cc_adapter" >/dev/null 2>&1; then ok "installed adapter matches this repo"
+    else warn "installed adapter differs from repo — re-run: ./install.sh"; fi
+  fi
+  # The event is a CAPABILITY, and this is the one mismatch that fails completely
+  # silently: an unknown event is ignored AND the hook still exits 0, so a
+  # protocol=2 bridge looks like a working watcher that never fires.
+  if [ -x "$inst" ]; then
+    case "$("$inst" --capabilities 2>/dev/null)" in
+      *blocked*) ok "shared bridge advertises the 'blocked' event (protocol 3)" ;;
+      *) warn "shared bridge does NOT support 'blocked' — ❓ can never fire for Command Code; re-run: WITH_BRIDGE=1 ./install.sh" ;;
+    esac
+  fi
+  if [ -f "$cc_settings" ] && have jq; then
+    cc_missing=""
+    # PostToolUse is the one that CLEARS ❓ (Command Code has no UserPromptSubmit
+    # to do it), so leaving it out pins a watcher-set ❓ until the turn ends.
+    for ev in SessionStart PreToolUse PostToolUse Stop; do
+      jq -e --arg e "$ev" '(.hooks[$e] // []) | tostring | contains("cmux-bridge-commandcode")' "$cc_settings" >/dev/null 2>&1 \
+        || cc_missing="$cc_missing $ev"
+    done
+    if [ -z "$cc_missing" ]; then ok "adapter registered for all four Command Code hook events"
+    else warn "adapter NOT registered for:$cc_missing — re-run './install.sh --with-commandcode', then RESTART Command Code"; fi
+  else
+    note "can't check $cc_settings registration (need that file + jq)"
+  fi
+  # Watcher liveness. The contract is ONE per live Command Code session, so the
+  # count is the thing to read: a lock whose pid is gone is stale (the watcher
+  # reaps itself on session exit, so a leftover means an orphan), and orphans do
+  # not self-heal — they keep polling the socket for as long as TMPDIR survives.
+  cc_watch="${TMPDIR:-/tmp}/cmux-sentinel-cc-watch"
+  if [ -d "$cc_watch" ]; then
+    live=0; stale=0
+    for d in "$cc_watch"/*.lock; do
+      [ -d "$d" ] || continue
+      p=$(cat "$d/pid" 2>/dev/null)
+      case "$p" in '' | *[!0-9]*) stale=$((stale + 1)) ;; *)
+        if kill -0 "$p" 2>/dev/null; then live=$((live + 1)); else stale=$((stale + 1)); fi ;;
+      esac
+    done
+    if [ "$live" -gt 0 ]; then ok "$live live pane watcher(s) — one per running Command Code session"
+    else note "no live pane watcher — it starts on the next hook event in a cmux terminal"; fi
+    if [ "$stale" -gt 0 ]; then
+      warn "$stale stale watcher lock(s) in $cc_watch — clear with: rm -rf $cc_watch"
+    fi
+  else
+    note "no watcher state yet (none has run in a cmux terminal)"
+  fi
+else
+  note "no Command Code adapter — its rows get ⚡/idle only; add --with-commandcode for ❓ waiting-on-you"
+fi
+
 echo "• auto-refresh"
 # cmux.json is JSONC (comments), so grep rather than jq-parse it.
 if [ -f "$CFG/cmux.json" ]; then

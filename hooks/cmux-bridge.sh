@@ -20,7 +20,8 @@
 #
 # Precedence: compacting > waiting > working. Waiting outranks working because a
 # session that asked AskUserQuestion / ExitPlanMode (or hit a MID-TURN permission
-# Notification) is alive but parked on YOU — showing it as "Working…" would hide
+# Notification, or was seen sitting on a blocking prompt on the live pane via the
+# `blocked` event) is alive but parked on YOU — showing it as "Working…" would hide
 # that it needs an answer. (The idle "waiting for input" Notification that fires
 # ~60s AFTER a turn ends is gated out — see _notify_waiting — so a finished
 # workspace never flips to ❓.) Compacting still wins (it's a transient busy state).
@@ -56,8 +57,13 @@
 # Capability query for adapters that may be newer than the installed bridge. It
 # intentionally runs before the cmux/socket gates and returns a token, not merely
 # exit 0: older bridges ignore unknown events and also exit successfully.
+#
+# protocol=3 adds `blocked`: an adapter that OBSERVED a blocking prompt on the
+# live pane may report it. An adapter MUST probe this before using the event —
+# protocol=2 silently ignores it (the case falls through), so an unconditional
+# `blocked` on an old bridge is a no-op that looks like a working watcher.
 if [ "${1:-}" = "--capabilities" ]; then
-  printf '%s\n' "protocol=2 stop-failure-final"
+  printf '%s\n' "protocol=3 stop-failure-final blocked"
   exit 0
 fi
 
@@ -339,6 +345,17 @@ case "$event" in
       *) _set_working ;;
     esac
     ;;
+  PostToolUse)
+    # A tool returned and the turn continues → ⚡. Redundant for Claude Code (its
+    # UserPromptSubmit and the NEXT PreToolUse both re-assert working), which is why
+    # this bridge long had no case for it. It is NOT redundant for an agent whose
+    # event set has no UserPromptSubmit: Command Code has only SessionStart /
+    # PreToolUse / PostToolUse / Stop, so this is the one signal that says "the
+    # prompt was answered and the tool actually ran". Without it, a ❓ raised by its
+    # pane watcher has nothing to clear its `.waiting.<pid>` flag until the next
+    # tool call or the end of the turn.
+    _set_working
+    ;;
 
   PreCompact)
     _set_compacting
@@ -388,6 +405,20 @@ case "$event" in
     title=$(echo "$input" | jq -r ".title // \"$AGENT_LABEL\"")
     message=$(echo "$input" | jq -r '.message // ""' | head -c 120)
     cmux notify --title "$title" --body "$message" &>/dev/null
+    ;;
+
+  Blocked)
+    # An adapter OBSERVED a blocking prompt on the live viewport (Command Code's
+    # shell-permission / plan-mode / act-mode / review cards, read by its pane
+    # watcher). Deliberately UNGATED — the opposite of Notification above, and for
+    # a reason: that gate drops the idle "waiting for your input" notice, which is
+    # a guess about the FUTURE inferred from an event. Here the evidence is the
+    # screen the user is looking at, so there is nothing to second-guess, and a
+    # turn may not even be in flight yet (Command Code's plan-mode prompt appears
+    # at launch, before the first pid file exists — exactly the case the gate would
+    # have thrown away). _set_waiting writes the pid file AND the waiting flag, so
+    # a watcher-detected ❓ is still ref-counted and still reaped by pid liveness.
+    _set_waiting
     ;;
 
   PostToolUseFailure)

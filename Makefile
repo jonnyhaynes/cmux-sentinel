@@ -13,13 +13,14 @@ SHELL   := bash
 SCRIPTS := bin/cmux-sentinel bin/cmux-claude-usage.sh bin/cmux-commandcode-usage.sh \
            bin/cmux-codex-usage.sh bin/cmux-amp-usage.sh bin/cmux-sentinel-doctor.sh \
            bin/cmux-sentinel-setup.sh bin/cmux-sidebar-live-smoke.sh bin/cmux-group-sync.sh hooks/cmux-bridge.sh \
-           hooks/cmux-title.sh \
+           hooks/cmux-title.sh hooks/cmux-bridge-commandcode.sh \
            install.sh scripts/check-secrets.sh scripts/make-formula.sh \
            hooks/zed-bridge.sh bin/cmux-open-in-zed.sh bin/zed-usage-tui.sh \
            tests/bridge-state.sh tests/poller-gate.sh tests/codex-poller.sh \
            tests/install-hooks.sh tests/sentinel-setup.sh tests/sentinel-doctor.sh tests/group-sync.sh \
            tests/zed-bridge.sh tests/open-in-zed.sh tests/usage-tui.sh \
-           tests/amp-bridge.sh tests/amp-poller.sh tests/entrypoint.sh tests/formula.sh
+           tests/amp-bridge.sh tests/amp-poller.sh tests/entrypoint.sh tests/formula.sh \
+           tests/commandcode-bridge.sh
 MD      := $(wildcard *.md) $(wildcard docs/*.md)
 
 .PHONY: help check ci lint shellcheck secrets markdown formula test doctor sidebar sidebar-live fmt fmt-check
