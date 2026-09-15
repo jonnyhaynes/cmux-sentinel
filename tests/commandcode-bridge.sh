@@ -133,18 +133,19 @@ reset_scenario() {
 }
 
 # Wait for the title to settle on $2 (tenths of a second). The watcher reports on
-# its first scan, so a positive is fast; a negative just has to outlast a couple
-# of scans.
+# its first scan, so a positive is fast locally — but CI runs this on a shared
+# Linux runner where process startup can be slow, so the default window is
+# generous: a false FAIL here costs more than a few seconds of wall clock.
 wait_title() {
   local i=0
-  while [ "$i" -lt "${2:-25}" ]; do
+  while [ "$i" -lt "${2:-40}" ]; do
     [ "$(title)" = "$1" ] && return 0
     sleep 0.1; i=$((i+1))
   done
   return 1
 }
-expect_title() { if wait_title "$2" "${3:-25}"; then ok "$1"; else bad "$1 (want '$2', got '$(title)')"; fi; }
-expect_stays() { if wait_title "$2" "${3:-12}"; then bad "$1 (unexpectedly became '$2')"; else ok "$1"; fi; }
+expect_title() { if wait_title "$2" "${3:-40}"; then ok "$1"; else bad "$1 (want '$2', got '$(title)')"; fi; }
+expect_stays() { if wait_title "$2" "${3:-15}"; then bad "$1 (unexpectedly became '$2')"; else ok "$1"; fi; }
 
 pane() { printf '%s' "$1" > "$ROOT/pane"; }
 locked() { [ -d "$ROOT/cmux-sentinel-cc-watch/$CC_PID.lock" ]; }
@@ -218,6 +219,12 @@ for entry in "${NEAR_MISSES[@]}"; do
   reset_scenario; boot_session
   printf '%b' "$text" > "$ROOT/pane"
   cc_hook "$(payload SessionStart)"
+  # Assert the watcher is actually UP first. "It did not report ❓" proves nothing
+  # if nothing was watching — and on a slow runner that is exactly how a negative
+  # assertion passes vacuously. The lock is minted synchronously by the hook, so
+  # no sleep is needed.
+  if locked; then ok "near miss: $label — watcher running (the negative has teeth)"
+  else bad "near miss: $label — no watcher, so 'no ❓' proves nothing"; fi
   expect_stays "near miss: $label does NOT set ❓" "❓workspace"
   end_session
 done
@@ -298,7 +305,7 @@ cc_hook "$(payload SessionStart)"
 sleep 0.3
 [ -d "$ROOT/cmux-sentinel-cc-watch/$CC_PID.lock" ] || bad "watcher started for the session"
 end_session
-sleep 0.8
+sleep 1.5   # generous: the loop notices a dead sid on its next scan, and CI is slow
 if [ -d "$ROOT/cmux-sentinel-cc-watch/$CC_PID.lock" ]; then
   bad "watcher exits and cleans its lock when the session pid dies"
 else

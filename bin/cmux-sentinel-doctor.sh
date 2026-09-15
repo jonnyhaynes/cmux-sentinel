@@ -15,6 +15,12 @@ export CMUX_QUIET=1
 
 CFG="$HOME/.config/cmux"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The fork is the DISTRIBUTION, so the version probe and the update advice it
+# prints must name the repo `cmux-sentinel update` actually installs from. Point
+# them upstream and the doctor nags about a release you cannot get while staying
+# silent about the one you can — two silent wrongs, which is the failure shape
+# this whole report exists to kill. One variable so the pair cannot drift.
+SELF_REPO="jonnyhaynes/cmux-sentinel"
 fails=0; warns=0
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 warn() { printf '  \033[33m⚠\033[0m %s\n' "$1"; warns=$((warns + 1)); }
@@ -59,12 +65,12 @@ if [ -f "$VERSION_FILE" ]; then
   note "cmux-sentinel v${inst_ver:-?} (installed ${inst_on:-?}${inst_sha:+, $inst_sha})"
   if [ "${CMUX_SENTINEL_UPDATE_CHECK:-1}" = 1 ] && have curl && [ -n "$inst_ver" ]; then
     latest="$(curl -fsS --max-time 3 \
-      https://raw.githubusercontent.com/oliver-kriska/cmux-sentinel/main/VERSION 2>/dev/null \
+      "https://raw.githubusercontent.com/$SELF_REPO/main/VERSION" 2>/dev/null \
       | tr -d '[:space:]')"
     case "$latest" in
       ''|*[!0-9.]*) : ;;   # unreachable or not a version — say nothing
       *) if ver_gt "$latest" "$inst_ver"; then
-           warn "v$latest is available (you have v$inst_ver) — see CHANGELOG.md; update with: curl -fsSL https://raw.githubusercontent.com/oliver-kriska/cmux-sentinel/main/install.sh | bash"
+           warn "v$latest is available (you have v$inst_ver) — see CHANGELOG.md; update with: curl -fsSL https://raw.githubusercontent.com/$SELF_REPO/main/install.sh | bash"
          fi ;;
     esac
   fi

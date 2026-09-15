@@ -4,7 +4,7 @@ Re-run the installer to update; it re-deploys every file, re-runs setup so a rel
 meter gets its workspace, re-parks the sentinels out of ⌘1…⌘9, repaints and reloads the sidebar.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/oliver-kriska/cmux-sentinel/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jonnyhaynes/cmux-sentinel/main/install.sh | bash
 ```
 
 `~/bin/cmux-sentinel-doctor.sh` reports the version you actually have.
@@ -45,6 +45,14 @@ curl -fsSL https://raw.githubusercontent.com/oliver-kriska/cmux-sentinel/main/in
 
 ### Fixed
 
+- **`cmux-sentinel update` fetched upstream's installer instead of this fork's.** The dispatcher
+  still pointed at the upstream repo while `install.sh` cloned the fork, so updating a fork install
+  would have replaced it with upstream's files — dropping every integration that lives only here —
+  and the doctor's version probe compared against upstream's `VERSION`, so it could nag about a
+  release you cannot install while staying quiet about the one you can. The install URL is now the
+  fork everywhere (dispatcher, `install.sh`, the doctor's probe and its advice, and the CHANGELOG
+  one-liner; the README already pointed here). The Homebrew formula and `docs/release.md` still
+  reference the upstream tap — that needs a tap of its own, which is a separate decision.
 - **The shared bridge ignored `PostToolUse` — it had no handler for it at all.** Claude Code never
   needed one (its `UserPromptSubmit` and the next `PreToolUse` both re-assert `⚡`), but Command Code
   has no `UserPromptSubmit`, which makes `PostToolUse` the only signal that a permission prompt was
