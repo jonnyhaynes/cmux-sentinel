@@ -3,22 +3,26 @@
 # cmux custom sidebar via sentinel workspaces. Third provider, sibling of
 # cmux-claude-usage.sh / cmux-codex-usage.sh; same display channel.
 #
-# Data source: the `amp usage` CLI, which prints (plain text, no ANSI):
-#   Signed in as <email> (<handle>)
-#   Subscription <Plan>: <N>% other usage and <M>% orb usage remaining - resets upon renewal in <when>
-#   Workspace <name>: $<amount> remaining - <url>
-# "other usage" = normal agent/thread execution; "orb usage" = Amp's remote
-# machines that run threads for you (`amp orb`). Both are subscription-included
-# allowances that reset on renewal.
+# Data source: the `amp usage` CLI, which prints (plain text, no ANSI). Two shapes
+# are live in the wild — Amp reworded it in ~2026-09 and every meter went dark:
+#   OLD  Subscription <Plan>: <N>% other usage and <M>% orb usage remaining - resets upon renewal in <when>
+#   NEW  **Amp <Plan> Tier:** agent usage $<a> of $<b> remaining (<N>%), orb usage
+#        <h>h of <H>h <size> orb hours remaining (<M>%) - period <from> to <to>, resets upon renewal in <when>
+#   (both followed by)  Workspace <name>: $<amount> remaining - <url>
+# "other usage" / "agent usage" = normal agent/thread execution; "orb usage" =
+# Amp's remote machines that run threads for you (`amp orb`). Both are
+# subscription-included allowances that reset on renewal.
 #
 # TWO WAYS THIS DIFFERS FROM THE OTHER PROVIDERS — both shape the code below:
 #
 #  1. NO --json, NO stable schema. `amp usage --json` is rejected outright, so the
 #     only source is human-facing prose that Amp is free to reword in any release.
 #     So parsing is deliberately loose and anchored on the smallest stable thing
-#     (the number immediately before "other usage" / "orb usage"), never on line
+#     (the allowance's own phrase plus the percentage tied to it), never on line
 #     position, field order, plan name, or the surrounding sentence. Anything it
-#     cannot parse is treated as "can't tell" (offline), NEVER as 0%.
+#     cannot parse is treated as "can't tell" (offline), NEVER as 0%. The new
+#     shape is only accepted when the percentage is explicitly "remaining (N%)":
+#     a future "used (N%)" must go offline, not get inverted into a wrong bar.
 #
 #  2. The numbers are REMAINING, the meters show USED. amp prints "100% other
 #     usage … remaining" for an untouched allowance; a meter at 100% must mean
@@ -58,6 +62,12 @@
 #   AMP_ORB_METER=1                # also meter orb usage (costs a ⌘ key)
 
 set -uo pipefail
+
+# cmux prints a one-time deprecation notice for legacy verbs (rename-workspace →
+# workspace rename) on STDERR. Anything that CAPTURES cmux stderr to explain a
+# failure gets that notice at the front of the reason, where it reads as the cause
+# — it buried a real "Command timed out" once. cmux documents this switch for it.
+export CMUX_QUIET=1
 
 AMP_BIN="${AMP_BIN:-amp}"
 # Existence-only login probe: never read these, they hold credentials.
@@ -218,6 +228,35 @@ pct_before() { # $1 = text  $2 = phrase
     | grep -oE "^[0-9]+(\.[0-9]+)?" 2>/dev/null
 }
 
+# The NEW shape puts the number AFTER the phrase, tied to the word "remaining":
+#   "agent usage $5.27 of $20 remaining (26%)" + "agent usage" -> 26
+# `[^(%]*` can't step over another percentage, and a clause that reaches into a
+# DIFFERENT allowance ("agent usage $5 of $20 remaining, orb usage … (39%)") is
+# rejected — otherwise an agent line with no percentage would silently steal the
+# orb number. Requiring "remaining" is what keeps the inversion honest.
+pct_after() { # $1 = text  $2 = phrase
+  local seg
+  seg=$(printf '%s' "$1" \
+    | grep -oE "$2[^(%]*remaining[[:space:]]*\([0-9]+(\.[0-9]+)?%\)" 2>/dev/null \
+    | head -1)
+  [ -n "$seg" ] || return 0
+  printf '%s' "${seg#"$2"}" | grep -q 'usage' && return 0
+  printf '%s' "$seg" | grep -oE '[0-9]+(\.[0-9]+)?%\)$' | tr -d '%)'
+}
+
+# REMAINING percentage for one allowance, trying each name it has gone by and
+# both sentence shapes. Empty = "can't tell" (the caller must not read it as 0).
+remaining_pct() { # $1 = text  $2... = phrases, first match wins
+  local text="$1" phrase v
+  shift
+  for phrase in "$@"; do
+    v=$(pct_before "$text" "$phrase")
+    [ -n "$v" ] || v=$(pct_after "$text" "$phrase")
+    [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+  done
+  return 0
+}
+
 # Amp's own reset phrase, e.g. "resets upon renewal in 1 month" -> "1 month".
 # Cosmetic only: an unparseable reset shows "?" and never blocks a meter.
 reset_text() { # $1 = text
@@ -288,18 +327,24 @@ main() {
     exit 0
   fi
 
-  out=$(fetch_usage) || {
+  local frc
+  out=$(fetch_usage); frc=$?
+  if [ "$frc" -ne 0 ]; then
+    # Amp's failure modes aren't distinguishable from the outside (no exit-code
+    # contract, and its stderr is swallowed to keep credentials out of the log), so
+    # do NOT invent a cause the way the old "(logged out? offline?)" guess-list did.
+    # Report the exit status and hand over the one command that shows the real error.
     [ "$mode" = "--update" ] && mark_offline "offline"
-    die "\`$AMP_BIN usage\` failed (logged out? offline?)"
-  }
+    die "\`$AMP_BIN usage\` failed (exit $frc) — run it by hand to see why"
+  fi
 
   if [ "$mode" = "--raw" ]; then
     printf '%s\n' "$out"
     return
   fi
 
-  remU=$(pct_before "$out" "other usage")
-  remO=$(pct_before "$out" "orb usage")
+  remU=$(remaining_pct "$out" "agent usage" "other usage")
+  remO=$(remaining_pct "$out" "orb usage")
   human=$(reset_text "$out")
   [ -n "$human" ] || human="?"
 
@@ -343,6 +388,14 @@ main() {
     [ "$ORB_METER" = "1" ] && { _update_bucket "$LABEL_AMPO" "$naO" "${usedO:-0}" "$human" || true; }
     [ "${#REJECTED[@]}" -gt 0 ] && die "cmux rejected the rename for: ${REJECTED[*]}"
     record_success || echo "WARN: meters updated, but couldn't record Amp freshness in $USAGE_STATE_DIR" >&2
+    # Parity with the Claude/Codex pollers: a success line, so the launchd .log
+    # proves the poller ran. Without it amp's log stayed 0 bytes forever and a
+    # silently-dead amp poller was indistinguishable from a healthy one.
+    if [ "$ORB_METER" = "1" ]; then
+      echo "updated: ${LABEL_AMPU}=$([ "$naU" = 1 ] && echo n/a || echo "${usedU}%")  ${LABEL_AMPO}=$([ "$naO" = 1 ] && echo n/a || echo "${usedO}%")"
+    else
+      echo "updated: ${LABEL_AMPU}=$([ "$naU" = 1 ] && echo n/a || echo "${usedU}%")"
+    fi
     [ "${#MISSING[@]}" -gt 0 ] && die "no sentinel workspace for: ${MISSING[*]} — create it: ~/bin/cmux-sentinel-setup.sh"
     return 0
   fi

@@ -17,16 +17,18 @@ background pollers. Batteries included, easy to fork and tweak.
 ## Features
 
 - **Flat workspace list** in your manual order, SF Mono, Ayu-Mirage palette.
-- **Live agent row states** (via Claude Code hooks or the Amp plugin): `compacting` (purple), `working`
-  (green), `needs you` (orange — unread, or the agent asked a question / hit a permission prompt),
-  and `idle` (dim). Idle repo rows omit redundant `idle`; active rows keep activity and repo state
+- **Live agent row states** (via Claude Code hooks or the Amp plugin, and — on cmux ≥ 0.64.23 —
+  cmux's own native agent state for every agent it integrates, no bridge needed): `compacting`
+  (purple), `working` (green, `×2` when several agents work in one workspace), `needs you` (orange —
+  unread, or the agent asked a question / hit a permission prompt), and `idle` (dim). Idle repo rows omit redundant `idle`; active rows keep activity and repo state
   separate. The header shows action-needed first, then working and compacting counts.
 - **Inline actions**: click to select, an always-visible high-contrast `×` to close, pin indicators,
   unread badges, and honest `⌘N` hints that preserve cmux's real shortcut gaps.
-- **Workspace-group names** (opt-in) — cmux gives custom sidebars no group data, so a group shows
-  its anchor's generic "Group 2" instead of its real name. A small background sync
-  (`GROUP_NAME_SYNC=1`) keeps each group's anchor title in step with the group name (see "Workspace
-  group names" below). Off by default; a no-op if you don't use groups.
+- **Workspace-group names** — on cmux ≥ 0.64.23 the sidebar reads groups directly: a group's
+  header row shows the group's real name with a stack icon, and takes no `⌘N` digit (matching
+  cmux's own numbering). Older cmux gave custom sidebars no group data, so there an opt-in
+  background sync (`GROUP_NAME_SYNC=1`) keeps each anchor title in step with the group name (see
+  "Workspace group names" below).
 - **Usage meters** — provider-labelled native progress bars fed by background pollers. Ships with
   **Command Code** (5-hour session + weekly window), **Claude Code** (5-hour session + 7-day week),
   **Codex** (whatever short/weekly windows the account currently reports), and **Amp** (monthly thread
@@ -47,13 +49,20 @@ cmux custom sidebars are runtime-interpreted SwiftUI-style files. The sidebar ca
 fixed set of per-workspace fields — it **cannot** fetch URLs or read arbitrary data. Two
 mechanisms feed it:
 
-1. **Agent row states** — Claude Code hooks or `hooks/amp-bridge.ts` → `hooks/cmux-bridge.sh` → a STATIC marker on the
+1. **Agent row states** — two sources, either one lights a row. **(a)** cmux ≥ 0.64.23 binds
+   `workspaces[i].agents` — cmux's own hook-driven per-agent state (Claude, Codex, opencode, Amp, …)
+   — so `working` shows with no bridge at all. **(b)** Claude Code hooks or `hooks/amp-bridge.ts` →
+   `hooks/cmux-bridge.sh` → a STATIC marker on the
    *active* workspace's **title** (`⚡` working, `⏳` compacting, `❓` waiting-on-you — an agent that
    asked a question or hit a permission prompt), reference-counted so multiple agents in one
    workspace don't stomp it and dead sessions can't strand it. Precedence is compacting > waiting >
    working. The sidebar detects the marker, colours the row, and strips the glyph for display.
    Agent state stays in the title because it must survive app/process boundaries and be shared by
-   co-tenant agents; an animated marker would freeze cmux's title coalescer.
+   co-tenant agents; an animated marker would freeze cmux's title coalescer. The bridge is still
+   what gives you `⏳ compacting` (cmux's native state has no such status) and a trustworthy Claude
+   `❓` — cmux flags a Claude session as needing input ~60s after every finished turn (Claude's idle
+   notification), so the sidebar ignores native `needs_input` for Claude and uses it only for other
+   agents.
 2. **Usage meters** — a poller (run by launchd every few minutes) computes each metric and writes
    it into a dedicated idle **"sentinel" workspace** using both `set-progress` (the native bar and
    label) and a title rename (stable anchor + fallback). The sidebar matches sentinels by title
@@ -96,6 +105,19 @@ Rules:
 
 The agent follows [`docs/agent-install.md`](docs/agent-install.md) — read it first if you want
 to see exactly what it will run. Prefer to do it by hand? Use the manual steps below.
+
+### Install with Homebrew
+
+```bash
+brew install oliver-kriska/tap/cmux-sentinel
+cmux-sentinel deploy      # puts the files where cmux and launchd expect them
+cmux-sentinel doctor      # confirm the pipeline is wired
+```
+
+`deploy` is not optional, and it is needed after every `brew upgrade` too. Homebrew owns the files
+under its own prefix; the sidebar lives in `~/.config/cmux/sidebars`, the pollers in `~/bin` and
+four launchd agents call them there — so a new formula on its own changes nothing that is running.
+`cmux-sentinel version` prints both numbers and tells you when they've drifted apart.
 
 ### Manual install
 
@@ -161,8 +183,9 @@ remaining manual steps. In short:
 
 `WITH_BRIDGE=1 ./install.sh` installs the bridge **and auto-wires** the Claude Code hook events
 into `~/.claude/settings.json` (idempotent, backed up) — then **restart Claude Code** so the new
-events register. Without the bridge, every row shows `idle`; with it you get `⚡ working` /
-`⏳ compacting` / `❓ waiting-on-you`.
+events register. With it you get `⚡ working` / `⏳ compacting` / `❓ waiting-on-you`. Without it, a
+cmux older than 0.64.23 shows every row `idle`; 0.64.23+ still shows `working` from cmux's native
+agent state, but not `compacting` or Claude's `waiting-on-you`.
 
 If the installer couldn't edit `settings.json` (no `jq`, or it wasn't valid JSON), add this under
 `"hooks"` by hand (keep any existing hooks; all entries are fire-and-forget), then restart Claude
@@ -247,12 +270,44 @@ of this repo are unaffected. Full setup and every toggle: [`docs/zed-integration
 **Prereqs:** macOS, cmux (custom sidebars / beta), `jq`, `curl`, and `git`. Provider-specific meters
 also require that provider's CLI/account credentials.
 
-## Updating
+## One command: `cmux-sentinel`
 
-There's no separate updater — **re-run the installer**. It re-deploys every file and backs up
-what it replaces.
+The installer drops a small dispatcher at `~/bin/cmux-sentinel` so you don't have to remember nine
+script names:
 
 ```bash
+cmux-sentinel setup            # create/repair the sentinel workspaces + re-park them out of ⌘1…⌘9
+cmux-sentinel doctor           # read-only health report for the whole pipeline
+cmux-sentinel version          # what's installed, when, from which commit
+cmux-sentinel usage            # --print every enabled provider (read-only; add --raw etc.)
+cmux-sentinel paint            # --update every enabled provider (writes the meters now)
+cmux-sentinel deploy           # (re-)install this version's files into ~/bin and ~/.config
+cmux-sentinel update           # fetch the latest release and install it
+cmux-sentinel group-sync --list
+cmux-sentinel zed              # open Zed on the current worktree (opt-in helper)
+```
+
+It's a dispatcher, not a replacement: every `~/bin/cmux-*.sh` script stays exactly where it is and
+keeps working when called directly — the LaunchAgents reference them by absolute path, so moving
+them would silently stop the meters on every already-bootstrapped install. Arguments and exit
+statuses pass straight through (`cmux-sentinel usage --raw` is `cmux-claude-usage.sh --raw`).
+
+## Updating
+
+There's no separate updater — **re-run the installer**. It re-deploys every file, backs up what it
+replaces, then **finishes the job**: it re-runs setup (so a release that adds a meter gets its
+workspace, and the sentinels are re-parked out of ⌘1…⌘9), repaints every enabled provider, and
+reloads the sidebar. Pass `--no-setup` if you want files only.
+
+Check what you have with `cmux-sentinel version` (or the header of `cmux-sentinel doctor`) — it
+reports the installed version, date and commit, and tells you when a newer one is published
+(`CMUX_SENTINEL_UPDATE_CHECK=0` turns the check off). `cmux-sentinel update` re-runs the installer
+from your git checkout.
+
+```bash
+# Homebrew — two steps, because brew cannot write to $HOME:
+brew upgrade cmux-sentinel && cmux-sentinel deploy
+
 # curl install — the bootstrap git-pulls ~/.cache/cmux-sentinel, then re-installs:
 curl -fsSL https://raw.githubusercontent.com/jonnyhaynes/cmux-sentinel/main/install.sh | bash
 
@@ -260,7 +315,7 @@ curl -fsSL https://raw.githubusercontent.com/jonnyhaynes/cmux-sentinel/main/inst
 git -C cmux-sentinel pull && cmux-sentinel/install.sh
 ```
 
-Then `cmux sidebar reload` to repaint. Notes:
+Notes:
 
 - An **already-installed bridge updates automatically** on a plain re-run — no `WITH_BRIDGE=1`
   needed (that flag is only for *adding* the bridge the first time).
@@ -303,6 +358,19 @@ not a sidebar edit, and gives three robustness guarantees:
   fetch is classified rather than guessed at, so the row says `⚠ auth` (401), `⚠ rate limit` (429),
   `⚠ api down` (5xx) or `⚠ offline` (unreachable), and `~/bin/cmux-sentinel-doctor.sh` replays the
   poller's own last error out of its launchd log.
+- **A failed fetch no longer wipes the meters — for a while.** The windows being metered move over
+  hours and days, so numbers that are minutes old are still worth reading. For
+  `CMUX_SENTINEL_STALE_GRACE` seconds (default 1800) after a fetch fails, each row keeps its last
+  good value and **swaps the reset countdown for the data's age** — `4% · 12m old` — so a stale
+  number can never pass for a live one. Past that window the rows fall back to the `⚠` marker, and
+  the poller exits non-zero and records no freshness the whole time, so the doctor still calls it
+  stale while the panel is still useful. Set it to `0` for the old wipe-on-failure behaviour.
+- **A 429 backs off; nothing else does.** A rate limit is the one failure where asking again on
+  schedule is what keeps you throttled, so after a 429 the poller stops calling the endpoint for
+  10, then 20, then 40 minutes (`CMUX_SENTINEL_BACKOFF_BASE`, capped by `CMUX_SENTINEL_BACKOFF_MAX`,
+  `0` disables) and clears that the moment a fetch succeeds. An expired token or a dropped network
+  costs the endpoint nothing to retry and recovers the instant you fix it, so those keep the normal
+  cadence.
 - **You can disable a provider you *do* have installed.** Set `USAGE_PROVIDERS` in
   `~/.config/cmux/usage-sentinels.env` (space-separated; default `claude`). Drop a name to make that
   poller a no-op without unloading launchd; then `cmux workspace close` its sentinels to remove the
@@ -331,6 +399,77 @@ cmux window. Codex requires a ChatGPT-plan login managed by the Codex CLI (`code
 logins are not covered by this account allowance. A stored login does not prove the token still
 works: the doctor also runs the live capability RPC and gives the exact `codex logout` → `codex
 login` recovery when reauthentication is required.
+
+### Extra-usage spend
+
+If your Claude account has an extra-usage (overage) budget, a `spend` row meters the money:
+
+```text
+spend |14% (€12.60 of €90.00)|██░░░░░░░░░░░░
+```
+
+**It hides itself until you actually spend something.** Money you haven't spent is not
+information, and a permanent `€0.00` row would train you to ignore the one row that matters the
+moment it moves. So the poller paints a marker while the balance is zero and the sidebar drops the
+row; the first charge makes it appear on its own, and the monthly reset makes it disappear again —
+no setup re-run, no flag.
+
+This is the only optional meter with no opt-in switch, and deliberately so: a row that costs
+nothing to look at doesn't need one, and a flag you never set could never warn you about a charge
+you didn't expect. The sentinel is created whenever the account *has* a budget (a stable property),
+not based on the balance. `~/bin/cmux-claude-usage.sh --print` always shows the figure, hidden row
+or not, so "why don't I see a spend row" has an answer.
+
+### Get alerted when an agent needs you (optional)
+
+The sidebar shows ❓ when a session is alive but blocked on you — it asked a question or is
+waiting on a permission. That is the one state worth interrupting you for when you are not
+looking at cmux, so the bridge can run a command on that transition:
+
+```bash
+# in ~/.zshrc, or wherever the agent's environment comes from
+export CMUX_SENTINEL_NOTIFY_CMD='terminal-notifier -title "cmux" -message "$1 needs you"'
+# or a phone push:
+export CMUX_SENTINEL_NOTIFY_CMD='curl -sfd "$1 needs you" ntfy.sh/YOUR-TOPIC'
+```
+
+The command gets the workspace label as `$1` and the event as `$2` (and the same values as
+`CMUX_SENTINEL_WORKSPACE` / `CMUX_SENTINEL_EVENT`). It fires once per transition into ❓, not once
+per hook event. It runs detached with its output discarded — it is on the agent's hot path, so a
+notifier that hangs or fails can never stall a turn; keep it a quick fire. Nothing else is
+notifiable by design: an alert you get for every state change is an alert you learn to ignore.
+
+**Other agents, without the bridge (cmux ≥ 0.64.23):** cmux has its own rule engine in
+`~/.cmuxterm/automations.json` that can `notify` / `run` / `webhook` on `agent.needs_input` for any
+agent cmux integrates (see cmux's `docs/automations.md`; `cmux automation test <id> --event …` is a
+dry run). One caveat for Claude sessions: cmux treats Claude's routine "waiting for your input"
+notification, which arrives about a minute after every finished turn, as needing input — the
+exact false alarm the bridge filters out. So keep `CMUX_SENTINEL_NOTIFY_CMD` for Claude and use a
+cmux automation for the others.
+
+### Meter a per-model weekly cap (optional)
+
+Anthropic publishes a per-model weekly cap alongside the account-wide `5h`/`7d` windows — today a
+Fable-scoped one. `~/bin/cmux-claude-usage.sh --print` always shows it if your account has one:
+
+```text
+5h  25%  · resets 2h 27m  (2026-08-24T14:59:59+00:00)
+7d  13%  · resets 3d 21h  (2026-08-28T09:59:59+00:00)
+m7d 15%  · resets 3d 21h  (2026-08-28T09:59:59+00:00)  [Fable-scoped weekly cap; set CLAUDE_MODEL_METER=1 to meter it]
+```
+
+Metering it is opt-in (`CLAUDE_MODEL_METER=1`, then re-run `~/bin/cmux-sentinel-setup.sh`) because
+the extra sentinel costs one of the ⌘1…⌘9 keys — the same rule that keeps the Amp orb meter off by
+default. The row renders with the model's own name as its label, beside the same `NN% (countdown)` every
+other meter shows:
+
+```text
+model-scoped weekly cap →   Fable        15% (3d 2h)
+```
+
+`m7d` is a fixed anchor the sidebar matches on; the name comes from the payload in its own title
+segment, so it follows Anthropic if they re-scope the cap to a different model. If your account has no such cap, setup skips the sentinel
+rather than parking a permanently-`n/a` row.
 
 ### Enable the Amp provider
 
@@ -408,8 +547,14 @@ Keychain or `~/.claude/.credentials.json` each run; never copied into this repo 
 
 ## Workspace group names
 
-cmux **workspace groups** (collapsible groups in the sidebar) have a logical name, but a custom
-sidebar can't see it: cmux passes the interpreter **no group data at all** — no `groups` list, no
+**On cmux ≥ 0.64.23 there is nothing to set up.** cmux now binds `groups` into custom sidebars, so
+the sidebar draws each group's header row with the group's own name (plus a stack icon) and leaves
+it — and the members of a collapsed group — out of the `⌘N` digits, exactly as cmux numbers them.
+`GROUP_NAME_SYNC` becomes redundant (leaving it on is harmless). The rest of this section applies to
+older cmux.
+
+cmux **workspace groups** (collapsible groups in the sidebar) have a logical name, but before 0.64.23 a
+custom sidebar couldn't see it: cmux passed the interpreter **no group data at all** — no `groups` list, no
 per-workspace group field, nothing in `extension.sidebar.snapshot` (verified by probe). A group's
 header *is* its **anchor** workspace's row, and the anchor's `title` is a **separate field** from the
 group's name — they diverge the moment you rename the group. So the sidebar shows the anchor's
@@ -429,8 +574,7 @@ it doesn't churn cmux's title coalescer). It's **opt-in** and a no-op until you 
 
 It's multi-window aware (groups are window-scoped; launchd has no window context) and needs no
 credentials or network. `~/bin/cmux-sentinel-doctor.sh` reports whether it's enabled, loaded, and
-whether any anchors are out of sync. If cmux exposes group data to custom sidebars later, the sync
-bridge can retire.
+whether any anchors are out of sync — or, on 0.64.23+, that the sidebar already shows names natively.
 
 ---
 
@@ -453,6 +597,8 @@ bin/cmux-amp-usage.sh        Amp monthly-allowance poller — `amp usage` parser
 bin/cmux-sentinel-setup.sh   idempotently create the meter sentinel workspaces (+ auto-naming guard)
 bin/cmux-group-sync.sh       workspace-group name → anchor-title sync (opt-in; --list | --raw | --update)
 bin/cmux-sentinel-doctor.sh  read-only, multi-window health-check of the whole pipeline
+bin/cmux-sentinel            one entry point: `cmux-sentinel setup|doctor|version|usage|paint|deploy|...`
+scripts/make-formula.sh      generate/verify the Homebrew formula for a tag (see docs/release.md)
 sidebars/workspaces.swift    the sidebar (the opinionated design + USAGE panels)
 hooks/cmux-bridge.sh         shared ref-counted agent-state bridge
 hooks/amp-bridge.ts          Amp plugin adapter → shared bridge
@@ -468,7 +614,11 @@ tests/group-sync.sh          offline group-sync gating + rename + marker-preserv
 tests/zed-bridge.sh          offline OSC/JSON state bridge tests
 tests/open-in-zed.sh         offline worktree-aware Zed handoff tests
 tests/usage-tui.sh           offline provider/rendering tests for the Zed usage TUI
+tests/entrypoint.sh          offline dispatcher tests (routing, arg + exit-status pass-through)
+tests/formula.sh             offline formula-generator tests (version agreement, no network)
 examples/                    usage-sentinels.env + launchd templates (Claude + Codex + Amp + group-sync)
+packaging/homebrew/          the tap's formula (generated — see docs/release.md)
+VERSION, CHANGELOG.md        release stamp; install.sh records it under ~/.config/cmux-sentinel/
 install.sh                   file placement + next-steps
 ```
 

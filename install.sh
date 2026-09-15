@@ -18,7 +18,8 @@ for arg in "$@"; do
     --with-bridge) export WITH_BRIDGE=1 ;;
     --with-amp)    export WITH_AMP=1 ;;
     --reload-agents) export RELOAD_AGENTS=1 ;;
-    -h|--help)     echo "usage: install.sh [--with-bridge] [--with-zed] [--with-amp] [--reload-agents]"; exit 0 ;;
+    --no-setup)    export NO_SETUP=1 ;;
+    -h|--help)     echo "usage: install.sh [--with-bridge] [--with-zed] [--with-amp] [--reload-agents] [--no-setup]"; exit 0 ;;
     *) echo "install.sh: unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -204,6 +205,13 @@ install -m 0755 "$here/bin/cmux-sentinel-doctor.sh" "$HOME/bin/cmux-sentinel-doc
 echo "  -> ~/bin/cmux-sentinel-doctor.sh  (run anytime to health-check the setup)"
 install -m 0755 "$here/bin/cmux-sentinel-setup.sh" "$HOME/bin/cmux-sentinel-setup.sh"
 echo "  -> ~/bin/cmux-sentinel-setup.sh  (creates the meter sentinel workspaces for you)"
+# One entry point for everything above. A DISPATCHER, not a replacement: the
+# cmux-*.sh scripts stay where they are and keep working when called directly,
+# because the LaunchAgents reference them by absolute path and launchd keeps its
+# loaded definition until reloaded. Moving them would stop the meters on every
+# already-bootstrapped install, silently.
+install -m 0755 "$here/bin/cmux-sentinel" "$HOME/bin/cmux-sentinel"
+echo "  -> ~/bin/cmux-sentinel  (one entry point: setup / doctor / usage / update)"
 install -m 0755 "$here/bin/cmux-group-sync.sh" "$HOME/bin/cmux-group-sync.sh"
 echo "  -> ~/bin/cmux-group-sync.sh  (opt-in: show workspace-GROUP names in the sidebar; set GROUP_NAME_SYNC=1)"
 
@@ -329,21 +337,90 @@ if [ "${WITH_AMP:-0}" = "1" ] || [ -f "$HOME/.config/amp/plugins/cmux-sentinel-a
   AMP_INSTALLED=1
 fi
 
+# ── version stamp ─────────────────────────────────────────────────────────────
+# Record WHAT was installed, so "is the fix in my copy?" is answerable without
+# asking the maintainer. The git sha is best-effort: the curl bootstrap installs
+# from a clone (so it has one), a tarball install does not.
+#
+# `git -C` WALKS UP, and a Homebrew tarball unpacks under /opt/homebrew, which is
+# itself a git repo — so an unguarded rev-parse would stamp Homebrew's HEAD and
+# confidently report a sha that has nothing to do with this tool. Only trust a sha
+# when the tree we are installing from IS the repo root.
+if [ -f "$here/VERSION" ]; then
+  mkdir -p "$HOME/.config/cmux-sentinel"
+  _sha=unknown
+  if [ "$(git -C "$here" rev-parse --show-toplevel 2>/dev/null)" = "$here" ]; then
+    _sha="$(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  fi
+  printf 'version=%s\ninstalled=%s\ncommit=%s\n' \
+    "$(cat "$here/VERSION")" "$(date +%Y-%m-%d)" "$_sha" \
+    > "$HOME/.config/cmux-sentinel/VERSION"
+  echo "  -> ~/.config/cmux-sentinel/VERSION  (v$(cat "$here/VERSION"), $_sha)"
+fi
+
+# ── finish the job ────────────────────────────────────────────────────────────
+# Deploying files used to be the whole install, followed by six manual steps. The
+# first of those — creating the sentinel workspaces — is idempotent, fail-open and
+# needs no input, so leaving it to the user bought nothing and cost everything: an
+# UPDATE would print "✅ Files installed" and change nothing visible, because the
+# new release's meters had no workspaces to live in. That is what a successful
+# install looked like to the first person who updated.
+#
+# So run it. Everything here is best-effort and NON-FATAL: a machine with no cmux
+# running, no socket automation, or no credentials must still finish the install
+# with its files in place. Opt out with --no-setup / NO_SETUP=1.
+setup_ran=0
+if [ "${NO_SETUP:-0}" = 1 ]; then
+  echo
+  echo "Skipping setup (--no-setup). Run ~/bin/cmux-sentinel-setup.sh when you're ready."
+elif ! command -v cmux >/dev/null 2>&1; then
+  echo
+  echo "cmux isn't on PATH — skipping sentinel setup. Once cmux is installed, run:"
+  echo "  ~/bin/cmux-sentinel-setup.sh"
+else
+  echo
+  echo "── Creating/refreshing the meter sentinels ──────────────────────────────"
+  # Re-running this on every install is the point: a release can ADD a meter, and
+  # creating a workspace shifts cmux's ⌘1…⌘9 numbering until the sentinels are
+  # re-parked (cmux drops a new workspace beside your current selection, not at
+  # the end). Both are exactly what setup fixes, idempotently.
+  if bash "$HOME/bin/cmux-sentinel-setup.sh"; then
+    setup_ran=1
+  else
+    echo "  ⚠ setup didn't complete — your files ARE installed. Re-run it by hand:" >&2
+    echo "      ~/bin/cmux-sentinel-setup.sh" >&2
+  fi
+
+  if [ "$setup_ran" = 1 ]; then
+    echo
+    echo "── Painting the meters ──────────────────────────────────────────────────"
+    # Only the providers the user actually enabled; each poller self-gates and
+    # exits 0 silently when its provider is off or uninstalled, so this is safe to
+    # run unconditionally.
+    for prov in claude commandcode codex amp; do
+      [ -x "$HOME/bin/cmux-$prov-usage.sh" ] || continue
+      bash "$HOME/bin/cmux-$prov-usage.sh" --update 2>/dev/null || true
+    done
+    cmux sidebar validate workspaces >/dev/null 2>&1 && cmux sidebar reload >/dev/null 2>&1 \
+      && echo "  ✓ sidebar reloaded" \
+      || echo "  ⚠ couldn't reload the sidebar — run: cmux sidebar reload"
+  fi
+fi
+
 cat <<'NEXT'
 
-✅ Files installed. NEXT STEPS (manual — they need your input):
+✅ Installed. What just happened: files deployed, sentinel workspaces created and
+   parked out of ⌘1…⌘9, meters painted, sidebar reloaded. Anything below is
+   OPTIONAL or needs a decision from you.
 
-1. Create the "sentinel" workspaces that hold the meters. EASIEST — let the setup
-   script make them (idempotent; honours USAGE_PROVIDERS; also checks auto-naming):
-     ~/bin/cmux-sentinel-setup.sh
-   Or by hand: create idle workspaces and name them so their TITLES start with the
-   labels (no ids to copy; cmux dropped stable UUIDs, so we match by title):
-     cmux workspace list                                    # find the refs
-     cmux rename-workspace --workspace workspace:<N> "5h"   # one for 5h, one for 7d
-   To use different labels, set SENTINEL_5H_LABEL / SENTINEL_7D_LABEL in
-   ~/.config/cmux/usage-sentinels.env and the matching hasPrefix() in the sidebar.
+   Claude meters: 5h (session) + 7d (week) always; "spend" whenever your account
+   has an extra-usage budget (it stays HIDDEN until you actually spend, so it
+   costs you nothing to carry); "m7d" for a per-model weekly cap only if you opt
+   in with CLAUDE_MODEL_METER=1 in ~/.config/cmux/usage-sentinels.env — setup
+   tells you when you have such a cap. `~/bin/cmux-claude-usage.sh --print` lists
+   whatever your account actually has, metered or not.
 
-2. Inspect and paint every enabled provider (skip the others; setup prints the
+1. Inspect and paint every enabled provider (skip the others; setup prints the
    matching --update commands):
      ~/bin/cmux-claude-usage.sh --print
      ~/bin/cmux-claude-usage.sh --update
@@ -351,15 +428,12 @@ cat <<'NEXT'
      ~/bin/cmux-codex-usage.sh --print && ~/bin/cmux-codex-usage.sh --update
      ~/bin/cmux-amp-usage.sh --print && ~/bin/cmux-amp-usage.sh --update
 
-3. Load the sidebar:
-     cmux sidebar validate workspaces && cmux sidebar reload && cmux sidebar select workspaces
-
-4. Enable external socket access for the 5-min auto-refresh — add to ~/.config/cmux/cmux.json:
+2. Enable external socket access for the 5-min auto-refresh — add to ~/.config/cmux/cmux.json:
      "automation": { "socketControlMode": "automation" }
    then run `cmux reload-config` (applies live on current builds). If external socket
    commands still get rejected later, the mode regressed — fully restart cmux.
 
-5. Start auto-refresh for every provider you enabled (skip the others). If the
+3. Start auto-refresh for every provider you enabled (skip the others). If the
    installer says a loaded plist changed, run its printed bootout + bootstrap
    commands, or re-run `./install.sh --reload-agents` to reload changed jobs only:
      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-claude-usage.plist
@@ -367,10 +441,11 @@ cat <<'NEXT'
      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-codex-usage.plist
      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-amp-usage.plist
 
-6. Verify the whole pipeline:
+4. Verify the whole pipeline:
      ~/bin/cmux-sentinel-doctor.sh        # or, from the repo:  make doctor
 
-(Working-state rows — ⚡ working / ⏳ compacting / ❓ waiting-on-you: run
+(Working-state rows — cmux 0.64.23+ already shows "Working…" from its own agent state.
+ For ⏳ compacting and Claude's ❓ waiting-on-you too, run
  WITH_BRIDGE=1 ./install.sh  — it installs the bridge AND auto-wires the hooks into
  ~/.claude/settings.json. Then RESTART Claude Code so the new hook events register.)
 
@@ -378,14 +453,17 @@ cat <<'NEXT'
  the opt-in Zed integration — a cmux→Zed worktree handoff, agent-state markers, and a
  usage-meter pane. It stays inert until you export ZED_SENTINEL=1. See docs/zed-integration.md.)
 
-(Workspace-GROUP names — if you use cmux workspace groups, the sidebar shows the
- anchor's generic "Group 2" instead of the group's name (cmux gives custom sidebars
- no group data). To fix: set GROUP_NAME_SYNC=1 in ~/.config/cmux/usage-sentinels.env,
+(Workspace-GROUP names — cmux 0.64.23+ shows them natively, nothing to do. On older
+ cmux the sidebar shows the anchor's generic "Group 2" instead of the group's name
+ (no group data reached custom sidebars). To fix: set GROUP_NAME_SYNC=1 in ~/.config/cmux/usage-sentinels.env,
  try it with `~/bin/cmux-group-sync.sh --list`, then start it:
    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmux-group-sync.plist )
 
-To UPDATE later: re-run this installer (curl one-liner or `git pull && ./install.sh`), then
-`cmux sidebar reload`. An already-installed bridge refreshes automatically — no flag needed.
+To UPDATE later: just re-run this installer (curl one-liner or `git pull && ./install.sh`).
+It re-deploys every file, re-runs setup so a release that ADDS a meter gets its
+workspace, re-parks the sentinels out of ⌘1…⌘9, repaints and reloads the sidebar.
+An already-installed bridge refreshes automatically — no flag needed. Pass
+--no-setup if you want files only.
 NEXT
 
 # Extra steps only when the Zed integration was just installed. Kept OUT of the main

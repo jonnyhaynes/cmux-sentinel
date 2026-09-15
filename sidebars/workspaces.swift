@@ -44,18 +44,47 @@ func hasProgressLabel(_ w) -> Bool {
 }
 
 // ── dimension 1: agent activity ───────────────────────────────────
-// "Working" is detected from a marker the bridge injects at the FRONT of the
-// TITLE ("⚡ name"). Agent state rides the title (not `progress`) because it must
-// be persistent and precedence-ordered; `progress` reaches the sidebar on 0.64.17
-// but is transient (meters use it — see meterRow). The interpreter's `.hasPrefix`
-// works here (proven), so we detect the marker on the title.
-// STATUS SOURCE = the leading glyph on w.title. The sidebar interpreter can ONLY read
-// w.title (color/description/progress all proved unreadable in this build), so status
-// rides a leading ⚡/⏳/❓ the bridge paints. `titleBase` strips it from the visible
-// row; the WINDOW TITLEBAR is pointed at {activeDirectory} so the glyph never shows
-// there. Titles are "<glyph?><brand> repo · branch".
+// Two sources, OR-ed, so every cmux version keeps working:
+//   1. STATIC title markers the bridge injects at the FRONT of the TITLE ("⚡ name").
+//      Persistent, precedence-ordered, and the ONLY source of ⏳ compacting.
+//   2. cmux ≥ 0.64.23 projects its own hook-driven session registry as
+//      `w.agents[]` (kind / status / lastActivityAt). That lights up EVERY agent
+//      cmux hooks — Codex, opencode, pi, cursor… — with no adapter of ours. On an
+//      older cmux the field is simply absent and only the markers count.
+// TRAP: `w.agents != nil` is ALWAYS false on this interpreter, even with agents
+// present (arrays don't compare to nil; dictionaries like `w.pr` do). Guard with
+// `.count > 0`, which is false for an absent array. Also: `var` mutation and
+// `return` inside a `for` loop silently do nothing here — use `.filter { }`, whose
+// closures DO capture outer names. All probed 2026-09-15.
+// A native `working` untouched for an hour is treated as stale: a turn that ends
+// without a Stop hook (Esc interrupt, a plugin host that never exits) otherwise
+// reads "working" forever. Same reasoning and the same default as the bridge's
+// CMUX_SENTINEL_WORK_TTL; `lastActivityAt` advances on every hook event, so only a
+// single tool call running past an hour could be dropped early.
+func workingAgentCount(_ w) -> Int {
+  if w.agents.count > 0 {
+    return w.agents.filter { $0.status == "working" && clock.epoch - $0.lastActivityAt < 3600 }.count
+  }
+  return 0
+}
+// cmux's `needs_input` is trusted for every agent EXCEPT Claude. cmux's reducer
+// maps ANY Claude `Notification` hook to needs_input, including the idle "waiting
+// for your input" notice Claude sends ~61s after every turn ends (measured in
+// ~/.cmuxterm/events.jsonl). Trusting it would flip every finished Claude workspace
+// to "needs you" a minute later — the done-marker behaviour that was rejected. The
+// bridge's ❓ already reports Claude precisely (it gates that notice out), so Claude
+// stays on the marker; Codex approvals, Cursor prompts etc. come from cmux.
+func agentNeedsInput(_ w) -> Bool {
+  if w.agents.count > 0 {
+    return w.agents.filter { $0.status == "needs_input" && $0.kind != "claude" }.count > 0
+  }
+  return false
+}
+// "Working" = the bridge's ⚡ marker OR a live native agent. The interpreter's
+// `.hasPrefix` works here (proven), so the marker is detected on the title.
 func isWorking(_ w) -> Bool {
-  return w.title.hasPrefix("⚡")
+  if w.title.hasPrefix("⚡") { return true }
+  return workingAgentCount(w) > 0
 }
 // Compacting is a distinct busy sub-state: the bridge swaps the working marker
 // for "⏳" while Claude compacts its context (PreCompact→PostCompact). Static
@@ -68,9 +97,12 @@ func isCompacting(_ w) -> Bool {
 // it asked a question (AskUserQuestion / ExitPlanMode) or hit a permission/idle
 // prompt. The session is alive but parked, so this beats "working" and rides the
 // orange needs-you treatment. Markers are mutually exclusive (one leading glyph),
-// so isWaiting ⇒ !isWorking && !isCompacting.
+// so isWaiting ⇒ !isWorking && !isCompacting — for the MARKER. A native non-Claude
+// agent asking for approval counts too (see agentNeedsInput), and waiting outranks
+// working wherever both hold, matching the bridge's precedence.
 func isWaiting(_ w) -> Bool {
-  return w.title.hasPrefix("❓")
+  if w.title.hasPrefix("❓") { return true }
+  return agentNeedsInput(w)
 }
 // needs-you = Claude is waiting on you (the ❓ marker) OR there are unread
 // messages while no agent is mid-turn. Working/compacting outrank a bare unread.
@@ -167,12 +199,29 @@ func branchFromTitle(_ w) -> String {
   return ""
 }
 
-// Row title = repo name only. Branch rides its own ⑂ line below (dimension 2).
+// A workspace-group ANCHOR shows its group's NAME. The anchor's own title does not
+// follow a group rename (they diverge), which is why cmux-group-sync.sh used to copy
+// the name into the title. cmux ≥ 0.64.23 binds `groups` directly, so the sidebar
+// reads it; on an older cmux `groups` is empty and the title path below runs as before.
+func groupName(_ w) -> String {
+  let named = groups.filter { $0.anchorId == w.id && $0.name != "" }
+  if named.count > 0 { return named[0].name }
+  return ""
+}
+func isGroupAnchor(_ w) -> Bool {
+  return groups.filter { $0.anchorId == w.id }.count > 0
+}
+
+// Row title: a named group anchor shows the group's name; every other row shows the
+// repo name only. Branch rides its own ⑂ line below (dimension 2).
 func displayTitle(_ w) -> String {
+  if groupName(w) != "" { return groupName(w) }
   return repoFromTitle(w)
 }
+// "×N" only when cmux reports more than one live agent — the markers can't count.
 func workLabel(_ w) -> String {
   if hasProgressLabel(w) { return w.progress.label }
+  if workingAgentCount(w) > 1 { return "Working… ×\(workingAgentCount(w))" }
   return "Working…"
 }
 func activityText(_ w) -> String {
@@ -254,6 +303,35 @@ func isClaudeMeter(_ w) -> Bool {
   if w.title.hasPrefix("5h ") { return true }  // Claude — 5h session window
   if w.title == "7d" { return true }           // bare bootstrap label (before the first poll paints a bar)
   if w.title.hasPrefix("7d ") { return true }  // Claude — 7d weekly window
+  // Per-MODEL weekly cap (e.g. a Fable-scoped allowance), opt-in via
+  // CLAUDE_MODEL_METER=1. The MODEL NAME is never part of the anchor — it rides
+  // the title's detail text, because the anchor must be a static literal here and
+  // Anthropic re-scopes which model is capped at will.
+  if w.title == "m7d" { return true }           // bare bootstrap label
+  if w.title.hasPrefix("m7d ") { return true }  // Claude — model-scoped weekly window
+  // Extra-usage (overage) SPEND. Not a time window — money against a monthly
+  // budget. Always a meter (so it never shows up in the normal workspace list),
+  // but the panel hides it while nothing has been spent; see isZeroSpend.
+  if w.title == "spend" { return true }           // bare bootstrap label
+  if w.title.hasPrefix("spend ") { return true }  // Claude — extra-usage spend
+  return false
+}
+// The spend row is the one meter that hides ITSELF. Money you haven't spent is not
+// information, and a permanent "€0.00" row would train you to ignore the very row
+// that matters when it finally moves. The poller writes this exact marker on every
+// run while the balance is zero (and a real bar the moment it isn't), so the row
+// appears and disappears on its own with no setup re-run and no flag.
+func isZeroSpend(_ w) -> Bool {
+  if w.title == "spend" { return true }                // created, never painted yet
+  if w.title.hasPrefix("spend |none|") { return true }  // painted, nothing spent
+  return false
+}
+// What the CLAUDE USAGE panel actually draws. Split from isClaudeMeter on purpose:
+// a hidden spend row must STILL count as a meter, or it would fall through into the
+// normal workspace list — visible in the one place we didn't want it.
+func isClaudePanelRow(_ w) -> Bool {
+  if isZeroSpend(w) { return false }
+  if isClaudeMeter(w) { return true }
   return false
 }
 // Codex provider — same shape as isClaudeMeter, distinct labels so the two never
@@ -323,6 +401,27 @@ func meterWindow(_ w) -> String {   // human label; title anchor remains unchang
   if w.title.hasPrefix("ampu ") { return "threads" }
   if w.title == "ampo" { return "orbs" }
   if w.title.hasPrefix("ampo ") { return "orbs" }
+  // Per-MODEL weekly cap. The model's own name IS the label — "Fable", not
+  // "model Fable", so the row keeps the one-word rhythm of every other meter. It
+  // can never be a literal here (Anthropic re-scopes which model is capped and
+  // scope.model.id is null), so the poller writes it as a 4th title segment:
+  //   m7d |15% (3d 2h)|▉▉░░░|Fable
+  // Split on "|" rather than on the detail's first space, so a name with a space
+  // in it survives. Anything without that segment — the bare bootstrap title, an
+  // "⚠ offline" stamp — falls back to the generic word.
+  if w.title == "m7d" { return "model" }   // bootstrap: created, never painted yet
+  if w.title.hasPrefix("m7d ") {
+    let parts = w.title.split(separator: "|")
+    if parts.count > 3 { return String(parts[3]) }
+    return "model"
+  }
+  // Extra-usage spend. Only ever drawn when there IS spend — a zero balance is
+  // filtered out upstream by isZeroSpend — so this never labels an empty row.
+  if w.title == "spend" { return "credits" }
+  if w.title.hasPrefix("spend ") { return "credits" }
+  // Every meter above is named. Reaching this means a NEW label was added to a
+  // meter predicate without a name here, which renders an anonymous "usage" row —
+  // that is exactly the bug this line is meant to make obvious rather than hide.
   return "usage"
 }
 func meterTint(_ w) -> String {
@@ -536,20 +635,36 @@ func meterRing(_ w) -> some View {
 
 // ── ⌘N shortcut digit ─────────────────────────────────────────────
 // The gray gutter digit is the workspace's REAL ⌘N key, mirrored from cmux's own
-// WorkspaceShortcutMapper (Sources/App/TerminalDirectoryOpenSupport.swift) so the
-// badge can never drift from the keystroke. Two things that logic dictates and a
-// naive 1..N counter would get WRONG:
-//   1. ⌘9 is NOT "the 9th" — it always targets the LAST workspace, so the digit
+// WorkspaceShortcutMapper so the badge can never drift from the keystroke. Three
+// things that logic dictates and a naive 1..N counter would get WRONG:
+//   1. ⌘9 is NOT "the 9th" — it always targets the LAST numbered row, so the digit
 //      hangs off the end of the list, not off position 9.
-//   2. The number indexes cmux's FULL workspace list (`manager.tabs`), which
-//      includes the usage sentinels. cmux has no notion of a "sentinel" — that
-//      concept lives only in this file's predicates — so the meters silently eat
-//      ⌘ slots and the visible rows have gaps. Numbering the visible rows 1..N
-//      instead would be a lie that makes ⌘N worse, so we key on w.index.
-// 0 = this row has no ⌘ key at all (indices 8…count-2 are unreachable).
+//   2. The numbering includes the usage sentinels. cmux has no notion of a
+//      "sentinel" — that concept lives only in this file's predicates — so the
+//      meters silently eat ⌘ slots and the visible rows have gaps. Numbering the
+//      visible rows 1..N instead would be a lie that makes ⌘N worse.
+//   3. Since 0.64.22 (#9176) cmux numbers only its ORDINARY sidebar rows: a group's
+//      ANCHOR (drawn as the group header) and every member of a COLLAPSED group are
+//      skipped, and each skip pulls every row below it one key up. This file used
+//      raw `w.index` and got that wrong for anyone with groups; `groups` is bindable
+//      since 0.64.23, so it now mirrors the same rule as JQ_NUMBERED in
+//      bin/cmux-sentinel-setup.sh / -doctor.sh. Without groups it reduces exactly to
+//      the old index math.
+// 0 = this row has no ⌘ key at all (positions 8…count-2 are unreachable).
+func inCollapsedGroup(_ w) -> Bool {
+  return groups.filter { $0.id == w.group && $0.collapsed == true }.count > 0
+}
+func isNumbered(_ w) -> Bool {
+  if isGroupAnchor(w) { return false }
+  if inCollapsedGroup(w) { return false }
+  return true
+}
 func shortcutDigit(_ w) -> Int {
-  if w.index < 8 { return w.index + 1 }             // ⌘1…⌘8 = fixed zero-based index
-  if w.index == workspaceCount - 1 { return 9 }     // ⌘9 = last workspace, whatever its index
+  if !isNumbered(w) { return 0 }
+  let pos = workspaces.filter { isNumbered($0) && $0.index < w.index }.count
+  let total = workspaces.filter { isNumbered($0) }.count
+  if pos < 8 { return pos + 1 }            // ⌘1…⌘8 = numbered position
+  if pos == total - 1 { return 9 }         // ⌘9 = last numbered row, whatever its position
   return 0
 }
 func shortcutLabel(_ w) -> String {
@@ -604,6 +719,10 @@ func row(_ w) -> some View {
           .frame(width: 20)
         VStack(alignment: .leading, spacing: 2) {
           HStack(spacing: 5) {
+            // Group header marker: the anchor row stands for the whole group and has no ⌘ key.
+            if isGroupAnchor(w) {
+              Image(systemName: "square.stack").font(.system(size: 10)).foregroundColor("#8A9199")
+            }
             if agentGlyph(w) != "" {
               Text(agentGlyph(w)).font(.system(size: 12)).foregroundColor("#8A9199")
             }
@@ -739,7 +858,10 @@ VStack(alignment: .leading, spacing: 0) {
   // and rows or between rows. Each provider is a ROW of two ring gauges (session +
   // week, side by side): ring fill = brand hue, centre % is severity-coloured
   // (red ≥90 / amber ≥70). Hidden unless at least one provider has sentinels.
-  if workspaces.filter { isUsageMeter($0) }.count > 0 {
+  // A zero-balance "spend" row does NOT count: it keeps its workspace (isUsageMeter,
+  // so it can't leak into the normal list) but is filtered out here, so it can never
+  // leave an empty USAGE header behind.
+  if workspaces.filter { isUsageMeter($0) && !isZeroSpend($0) }.count > 0 {
     VStack(alignment: .leading, spacing: 15) {
       Text("USAGE").font(.system(size: 10, design: .monospaced)).bold().foregroundColor("#8A9199")
 
@@ -752,11 +874,14 @@ VStack(alignment: .leading, spacing: 0) {
         }
       }
 
-      // CLAUDE — two rings (5h left of 7d). Match the PREFIX, never a substring:
-      // a weekly countdown can itself contain "5h".
-      if workspaces.filter { isClaudeMeter($0) }.count > 0 {
+      // CLAUDE — two rings (5h left of 7d), plus the optional m7d (per-model weekly)
+      // and spend rows, which have no rank of their own and keep workspace order
+      // (setup creates them last). Match the PREFIX, never a substring: a weekly
+      // countdown can itself contain "5h". isClaudePanelRow, not isClaudeMeter: a
+      // zero-balance spend row is still a meter but must not draw (see isZeroSpend).
+      if workspaces.filter { isClaudePanelRow($0) }.count > 0 {
         HStack(alignment: .top, spacing: 0) {
-          ForEach(workspaces.filter { isClaudeMeter($0) }.sorted { $0.title.hasPrefix("5h") && !$1.title.hasPrefix("5h") }) { w in
+          ForEach(workspaces.filter { isClaudePanelRow($0) }.sorted { $0.title.hasPrefix("5h") && !$1.title.hasPrefix("5h") }) { w in
             meterRing(w)
           }
         }

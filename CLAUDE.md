@@ -64,12 +64,54 @@ and cleans it up; it deliberately does not claim a pixel pass. See
   every interpreter-visible field and has no status among them: always `id`, `title`, `selected`,
   `pinned`, `index`, `directory`, `ports`+`portCount`, `unread`, `tabs`+`tabCount`; optional
   `description`, `color`, `branch`+`dirty`, `pr`+`prs`, `progress`, `latestMessage`, `latestPrompt`,
-  `latestAt`, `remote`. **Consequence: a cmux-native agent integration can never light up this
-  sidebar — per-agent title-marker bridges stay mandatory.** (`latestMessage`/`latestPrompt`/
+  `latestAt`, `remote`. ~~Consequence: a cmux-native agent integration can never light up this
+  sidebar — per-agent title-marker bridges stay mandatory.~~ (`latestMessage`/`latestPrompt`/
   `latestAt` are bindable and currently unused here.) Upstream issue
   `manaflow-ai/cmux#9001` tracks unifying this projection with the snapshot's missing `progress`
   (still OPEN, no maintainer response as of 2026-08-10; so is #9002 for a render diagnostic).
   Re-read on 0.64.22: the binding list above is **UNCHANGED** — nothing gained, nothing lost.
+  **SUPERSEDED on 0.64.23 (#10401): `w.agents[]` now carries native per-agent state** — `kind`,
+  `name`, `status` (`idle`|`working`|`needs_input`|`ended`), `lastActivityAt`, optional `sinceEpoch`,
+  `title`, `panelId`/`surfaceId`, `directory`, `pid`, `children[]` (subagents). It projects cmux's
+  hook-driven session registry, so it covers every agent cmux hooks (Claude, Amp, Codex, … — no
+  adapter of ours needed). Render-probed 2026-09-15: `\(w.agents[0].status)` → `working` on this
+  session's workspace, `amp|…` and `codex|ended` records present. `set-status` still has no binding;
+  `agents` is the replacement. Gaps that keep the bridge alive: **no compacting status** (⏳ has no
+  native source), stale `idle` records accumulate (24 = the cap on one workspace), and native
+  `needs_input` is WRONG for Claude (below). The snapshot RPC omits `agents` (same divergence as
+  `progress`). See `.claude/research/2026-09-15-cmux-0.64.23-release-check.md`.
+  **How the sidebar uses it (shipped 2026-09-15): native state is OR-ed with the title markers,
+  never instead of them.** `isWorking` = `⚡` marker OR any agent `status == "working"` whose
+  `lastActivityAt` is under 3600s old; `isWaiting` = `❓` marker OR any NON-Claude agent in
+  `needs_input`. Two rules, each learned: **(1) never trust native `needs_input` for
+  `kind == "claude"`.** cmux's reducer (`AgentChatSessionRegistry+Lifecycle.swift` `nextState`) maps
+  EVERY `notification` hook to `needsInput`, and Claude sends its idle "waiting for your input"
+  Notification ~61s after every `Stop` (measured in `~/.cmuxterm/events.jsonl`) — so every resting
+  Claude workspace would turn orange a minute after its turn. That is precisely the gate the bridge's
+  `_notify_waiting` exists for, and a passive "done" signal is what Oliver rejected. Other agents
+  (Codex, opencode, …) only hit `needs_input` on a real permission/question event. **(2) TTL the
+  native `working` the same way the bridge TTLs its markers** — the reducer has no reaper, so an agent
+  that never sends `Stop` stays `working` forever (the Amp plugin-host problem again). `clock.epoch -
+  lastActivityAt` is plain Int arithmetic and works. `⏳ compacting` stays bridge-only (the reducer
+  leaves the state unchanged on `preCompact`). `workLabel` shows `Working… ×N` when N>1 agents work in
+  one workspace — `children[]` subagents are deliberately not counted.
+- **TRAP: `!= nil` on an ARRAY field is always false — guard arrays with `.count > 0`.** Probed
+  2026-09-15: `w.agents != nil` → false (and `if w.agents != nil { … }` never renders) on a workspace
+  where `w.agents.count` is 2. `w.agents.count > 0` and `w.agents.filter { $0.status == "working" }.count`
+  work; on an absent array `.count > 0` is false. `!= nil` on a DICTIONARY field (`w.pr`, `w.progress`)
+  still works. This nearly produced a wrong "Swift can't see `agents`" note — the raw `\(w.agents)`
+  interpolation plus a known-set control is what caught it.
+- **TRAP: no mutation and no early exit from loops — use `.filter { … }.count`.** Probed 2026-09-15:
+  `var n = 0; for a in w.agents { n += 1 }` leaves `n == 0`, and `return` inside a `for` body does
+  not return from the function — both silently, `validate` passes. What DOES work: `.filter` closures
+  that CAPTURE outer values (`workspaces.filter { $0.index < w.index }` inside a per-row helper), a
+  `let` computed first and compared after (don't write `if x == arr.filter { … }.count - 1 {` — a
+  trailing closure inside an `if` condition is an ambiguity trap), and helper calls inside closures.
+  Every counter in the sidebar (`workingAgentCount`, `shortcutDigit`) is written that way.
+- **TRAP: a `.js` sidebar with our base name silently REPLACES ours.** 0.64.23 added a reactive JS
+  runtime (`~/.config/cmux/sidebars/<name>.js`), and for one base name `.js` wins over `.swift`, which
+  wins over `.json`. Upstream ships `Examples/CustomSidebars/workspaces.js` — our exact base name. The
+  JS context has no filesystem/network/timers, so sentinels stay the only meter data path either way.
 - **cmux SHIPPED a native workspace "status lane" concept in 0.64.22 — usable by hand, invisible to
   us.** `markWorkspaceDone` (⌘;) and `cycleWorkspaceStatus` (⌘⇧;, "cycle the workspace status one
   lane forward") are present at the **v0.64.22 tag** (verified by fetching
@@ -126,7 +168,7 @@ and cleans it up; it deliberately does not claim a pixel pass. See
   `<anchor> |<detail>|<unicode bar>` so the fallback keeps the same label/detail-then-bar rhythm when
   `progress` is absent. The title's severity emoji (🟡/🔴) stays because title **color** still can't
   come from data.
-- **Workspace-GROUP data NEVER reaches the sidebar interpreter** (probed 2026-06-19, see
+- **Before 0.64.23, workspace-GROUP data NEVER reached the sidebar interpreter** (probed 2026-06-19, see
   `.claude/research/2026-06-19-workspace-group-names-in-sidebar.md`). There is no `groups` binding and
   no per-workspace group field — referencing `groups` renders empty (the interpreter is lenient, it
   does NOT blank), and `extension.sidebar.snapshot` carries no group fields either. A cmux group's
@@ -136,9 +178,18 @@ and cleans it up; it deliberately does not claim a pixel pass. See
   as the meters: `bin/cmux-group-sync.sh` (opt-in `GROUP_NAME_SYNC=1`) renames each anchor's title to
   `group.name` via the **title channel** (preserving any ⚡/⏳ marker, writing only on change). Don't
   try to read group data in the sidebar — it isn't there.
+  **SUPERSEDED on 0.64.23 (#10401):** the shared data context now emits `groups`
+  (`{id, name, collapsed, pinned, anchorId, color?, icon?}`) and a grouped workspace carries `group`
+  (its group id). **Live-verified 2026-09-15 with a throwaway group** whose anchor TITLE was renamed
+  to something else via `workspace-action --action rename` (NOT `workspace-group rename`, which renames
+  the anchor title too and so can't tell the two paths apart): the anchor row rendered the GROUP name.
+  So the sidebar now reads it directly — `groupName(w)` (anchor → `groups[].name`) wins in
+  `displayTitle`, anchors get a `square.stack` glyph and no ⌘ digit — and `cmux-group-sync.sh` is only
+  needed for cmux < 0.64.23 (the doctor says so). On an older cmux `groups` is empty, every helper
+  falls through, and the sidebar behaves exactly as before.
 - **No modifier-key state reaches the interpreter — ⌘-hold hints are impossible.** The live
-  bindings are only `workspaces` / `tabs` / `workspaceCount` / `selectedTitle` / `selectedId` /
-  `unreadTotal` / `clock`; there's no keyboard/modifier binding (and no `@State`, no
+  bindings are only `workspaces` / `tabs` / `groups` (0.64.23+) / `workspaceCount` / `selectedTitle` /
+  `selectedId` / `unreadTotal` / `clock`; there's no keyboard/modifier binding (and no `@State`, no
   `.keyboardShortcut`). cmux's NATIVE sidebar does draw ⌘-hold digit badges
   (`modifierKeyMonitor.isModifierPressed`), but that's internal to it. Even given a binding, the
   ~1s re-eval would lag a held key. Needs an upstream feature — don't try to fake it.
@@ -174,8 +225,17 @@ and cleans it up; it deliberately does not claim a pixel pass. See
   is a ⌘ key doing something odd. **Collapsing a group above the meters now spends that headroom the
   same way a close does.** So `bin/cmux-sentinel-doctor.sh` reports which digits (if any) the
   meters are eating and warns when headroom is down to one close; the fix is always "re-run setup".
+  **Except when there's nothing to fix:** with fewer than 9 NUMBERED real workspaces some meter
+  must hold a key (9 keys, 8 owners), and setup's best layout still loses ⌘8. The doctor reports
+  that as a NOTE ("unavoidable with N real workspace(s)") instead of a warning whose advice can't
+  work — but only when the eaten count is at that minimum AND ⌘9 is real (setup anchors ⌘9 with 2+
+  reals, so ⌘9 on a meter stays fixable drift). `tests/sentinel-doctor.sh` T16.
   Read-only, for the same reason it's not in the pollers. Both scripts keep an identical copy of the
   `JQ_NUMBERED` jq helper (setup parks by it, doctor reports drift off it) — change them together.
+  **The sidebar's `isNumbered`/`shortcutDigit` is the THIRD copy of that rule** (Swift, 0.64.23+ only,
+  since it needs the `groups` binding): anchor or member of a collapsed group → no digit, position =
+  numbered rows above it, ⌘9 = last numbered row. Before it, the gutter keyed on raw `w.index` and
+  drew wrong digits under any group. Live-verified expanded and collapsed with a throwaway group.
   The source is fetchable; `cmux docs shortcuts` names the raw URLs.
   See `.claude/research/2026-08-10-cmux-0.64.22-vacation-catchup.md`,
   `.claude/research/2026-07-15-workspace-shortcut-digits.md` and
@@ -200,6 +260,7 @@ cmux sidebar validate workspaces && cmux sidebar reload   # synthetic interpreta
 ./bin/cmux-claude-usage.sh --print     # parsed values
 ./bin/cmux-claude-usage.sh --raw       # raw API JSON (no token)
 ./bin/cmux-claude-usage.sh --update    # writes title fallback + native progress
+./bin/cmux-claude-usage.sh --buckets   # which labels have live data (fails open); drives setup
 ./bin/cmux-codex-usage.sh --print      # Codex: live utilization via account/rateLimits/read
 ./bin/cmux-codex-usage.sh --raw        # normalized JSON; account-scoped reset-credit ids removed
 ./bin/cmux-codex-usage.sh --raw-full   # complete account-private JSON — inspect locally only
@@ -212,24 +273,26 @@ cmux sidebar validate workspaces && cmux sidebar reload   # synthetic interpreta
 ./bin/cmux-sentinel-setup.sh           # create known-live provider sentinels; fail open when unknown + park them out of ⌘1…⌘9
 ./bin/cmux-group-sync.sh --list        # workspace-GROUP names: which anchors are out of sync (read-only)
 ./bin/cmux-group-sync.sh --update      # rename group anchors to the group name (needs GROUP_NAME_SYNC=1)
+cmux-sentinel doctor                   # dispatcher: setup/doctor/version/usage/paint/update/group-sync/zed
 make sidebar-live                     # mount repo sidebar against live data; human visual verdict
 
-# offline tests (stub cmux/security/curl/$HOME — run in CI too)
-make test   # bridge-state(49) poller-gate(55) codex-poller(83) install-hooks(52) sentinel-setup(52)
-            # sentinel-doctor(36) group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(23)
-            # amp-bridge(43) amp-poller(49) = 504 assertions total
+# offline tests (stub cmux/security/curl/stat/$HOME — run in CI too)
+make test   # bridge-state(58) poller-gate(130) codex-poller(83) install-hooks(62) sentinel-setup(69)
+            # sentinel-doctor(71) group-sync(24) zed-bridge(24) open-in-zed(14) usage-tui(23)
+            # amp-bridge(43) amp-poller(61) entrypoint(33) formula(18) = 713 assertions total
 ```
 
 ## Architecture / where things live
 
 ```text
 sidebars/workspaces.swift  the sidebar. isClaudeMeter()/isCodexMeter()/isAmpMeter() = title-label `.hasPrefix` per provider; isUsageMeter() = any.
-bin/cmux-claude-usage.sh    Claude usage poller. make_bar / sev_dot / mark_offline / bucket_field / to_pct / resolve_ref(+_paint, multi-window).
+bin/cmux-claude-usage.sh    Claude usage poller. scoped_weekly (per-model cap, opt-in m7d) + response cache. make_bar / sev_dot / mark_offline / bucket_field / to_pct / resolve_ref(+_paint, multi-window).
 bin/cmux-codex-usage.sh     Codex usage poller (short-lived account/rateLimits/read app-server RPC; Codex owns auth/refresh). Default meter + read-only named limits/reset credits; sanitized --raw / local-only --raw-full; actionable RPC failure classes; --buckets drives setup.
 bin/cmux-amp-usage.sh       Amp usage poller (scrapes `amp usage` PROSE — no --json). Monthly allowance, not windows. REMAINING→USED inversion. ampu (agent) + ampo (orb, opt-in AMP_ORB_METER=1).
 bin/cmux-sentinel-setup.sh  idempotent sentinel creation (per USAGE_PROVIDERS; known-live buckets only, fail-open on unknown) + auto-naming guard probe + ⌘N shortcut layout (layout/sentinel_window/JQ_NUMBERED, --no-layout).
 bin/cmux-sentinel-doctor.sh READ-ONLY wiring report: cmux/sidebar/bridge/auto-refresh, installed × enabled × live capability × sentinel × freshness per provider, informational Codex limits/reset credits, ⌘N layout drift (JQ_NUMBERED), snapshot data.
                             JQ_NUMBERED is duplicated verbatim in both files — cmux numbers ⌘1…⌘9 over the ORDINARY sidebar rows (group anchors + collapsed members excluded), so change them together.
+bin/cmux-sentinel           DISPATCHER installed as ~/bin/cmux-sentinel: setup|doctor|version|usage|paint|deploy|update|group-sync|zed. Resolves the cmux-*.sh helpers next to itself (or ../libexec, or ~/bin) and `exec`s them, so exit status and args pass through untouched. It does NOT replace them — the LaunchAgents reference them by absolute path.
 bin/cmux-sidebar-live-smoke.sh  stage + validate + mount the repo sidebar against live data, wait for a human verdict, then close/clean up; not a pixel assertion.
 bin/cmux-group-sync.sh      workspace-GROUP name → anchor-title sync (opt-in GROUP_NAME_SYNC). split-marker / multi-window / --list|--raw|--update.
 hooks/cmux-bridge.sh        Claude Code → cmux agent-state bridge (⚡ working / ⏳ compacting / ❓ waiting-on-you rows). AGENT-AGNOSTIC: CMUX_SENTINEL_SESSION_PID / _AGENT_LABEL / _LOG_SOURCE let any agent's adapter reuse it.
@@ -237,7 +300,10 @@ hooks/amp-bridge.ts         Amp plugin (Bun/TS) → drives cmux-bridge.sh. Thin 
 hooks/zed-bridge.sh         OPT-IN (ZED_SENTINEL=1) cmux-free Zed bridge: same ⚡/⏳/❓ markers to OSC-2 terminal metadata + JSON sink (stock Zed tab label stays process-derived).
 bin/cmux-open-in-zed.sh     OPT-IN cmux→Zed worktree handoff (`ze` alias / Ctrl-O via --shell-init). git-toplevel-aware; switch/--add/--new/--print.
 bin/zed-usage-tui.sh        OPT-IN usage meters rendered in a Zed terminal pane (reuses the pollers). No cmux writes.
-tests/                      bridge-state + poller-gate + codex-poller + amp-poller + install-hooks + sentinel-setup + sentinel-doctor + group-sync + zed-bridge + open-in-zed + usage-tui + amp-bridge. `make test`.
+tests/                      bridge-state + poller-gate + codex-poller + amp-poller + install-hooks + sentinel-setup + sentinel-doctor + group-sync + zed-bridge + open-in-zed + usage-tui + amp-bridge + entrypoint. `make test`.
+scripts/make-formula.sh     GENERATES packaging/homebrew/cmux-sentinel.rb for a tag (url+sha256+version must agree); `--check` is the offline gate `make formula` runs.
+packaging/homebrew/         the tap's formula. Generated — regenerate after tagging, never hand-edit.
+VERSION + CHANGELOG.md      release stamp. install.sh copies VERSION (+ install date + short commit) to ~/.config/cmux-sentinel/VERSION; `cmux-sentinel version` and the doctor header read it back and compare against the remote VERSION (fail-silent; CMUX_SENTINEL_UPDATE_CHECK=0 disables).
 examples/                   usage-sentinels.env + launchd plist templates (com.cmux-claude-usage / com.cmux-codex-usage / com.cmux-amp-usage / com.cmux-group-sync).
 ```
 
@@ -275,6 +341,18 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   `tests/bridge-state.sh` K–K5 (back-dated with `touch -t CCYYMMDDhhmm`, the one form both BSD and
   GNU accept, so the block needs no sleeps).
 
+- **The ❓ transition is the ONLY notifiable event** (`CMUX_SENTINEL_NOTIFY_CMD`, opt-in, empty
+  = off). An agent that is alive but parked on YOU is the one state worth interrupting someone
+  out-of-window for; working/idle/finished are passive status you read off the sidebar when you
+  look — which is exactly why the ✅ "done" marker was rejected. Adding a second notifiable
+  event would make the alert ignorable and cost you the ❓, so don't. It fires from
+  `_set_waiting` AFTER the already-waiting guard (one alert per transition, not per hook event),
+  runs `sh -c "$CMUX_SENTINEL_NOTIFY_CMD"` with the workspace label as `$1` / the event as `$2`
+  (also `CMUX_SENTINEL_WORKSPACE` / `_EVENT` in the env), and is **detached with output
+  discarded on purpose**: this is the agent's hot path, so a notifier that blocks or fails must
+  never stall a turn or break the marker. The accepted cost is that a notifier which hangs
+  forever leaks one process — keep it a quick fire (`curl -sf`, `terminal-notifier`).
+  Covered by `tests/bridge-state.sh` block L.
 - **Amp agent state needs OUR OWN plugin — cmux's native amp integration cannot light up this
   sidebar.** `cmux hooks amp install` writes `~/.config/amp/plugins/cmux-session.ts`, which reports
   state with `cmux set-status` → native-sidebar pills only (see the set-status bullet above). So
@@ -360,6 +438,99 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   most people never run orbs, so metering it by default would cost a real ⌘ key for an unused row.
   `provider_available()` checks the binary plus a non-empty
   `~/.local/share/amp/secrets.json` — it never reads the file, which holds credentials.
+- **Anthropic publishes a per-MODEL weekly cap; it is metered only on request (`m7d`).**
+  Alongside `five_hour`/`seven_day` the payload carries a modern self-describing
+  `limits[]` array whose `kind == "weekly_scoped"` row is a model-scoped allowance
+  (`scope.model.display_name` = "Fable" today). Three rules, each of which is a trap:
+  **(1) the two working meters keep reading the legacy top-level buckets** — `limits[]` is
+  parsed ONLY for the new row, because adding a feature must never put a proven meter at risk.
+  **(2) never hardcode the model name.** `scope.model.id` is `null`, so `display_name` is the
+  only handle, and Anthropic re-scopes which model is capped at will. The name therefore rides
+  its OWN 4th title segment — `m7d |15% (3d 2h)|▉…|Fable` — never the anchor (that has to be a
+  static `.hasPrefix` literal) and never the detail. The sidebar draws it as the ROW LABEL,
+  where every other meter shows one word ("session", "week", "threads"); prefixing the detail
+  instead shipped a row reading `model  Fable 15% (3d 2h)`, saying it twice. Split on `|`, not
+  on the detail's first space, so a name containing a space survives. **(3) `seven_day_opus`/`seven_day_sonnet` exist as
+  top-level keys and are `null`** — reading those is exactly the "renders empty ≠ unreachable"
+  mistake this file keeps warning about; a non-null `weekly_scoped` row is the only proof.
+  Off by default (`CLAUDE_MODEL_METER=1`) for the same reason as the Amp orb meter: the sentinel
+  is an ordinary workspace and costs one of the ⌘1…⌘9 keys. **An opt-in meter that skips SILENTLY is a bug, not restraint** — the first user to update
+  saw no Fable row and couldn't tell "off" from "broken". So all three surfaces name the switch:
+  `--print` lists the row (and how to enable it) whether or not it is metered; setup probes what
+  `--buckets` WOULD answer with the flag on and says so only when a real cap exists (no cap, no
+  noise); the doctor says "the per-model meter is off" plus the variable, instead of the useless
+  "correct, it isn't metered". Discovering the feature must never require opting into it first.
+  `--buckets` was added to the Claude poller for setup's `ensure_live`, with the same fail-open
+  contract as Codex/Amp: it lists `5h`/`7d` always and adds `m7d` only when opted in AND the cap
+  is live — silence never suppresses. Opted in with no cap → the row paints an honest `n/a`
+  rather than a fabricated 0%, and does NOT fail (Anthropic adds and drops these).
+- **The `spend` meter is the one row that HIDES ITSELF, and the one optional row with no
+  opt-in flag.** The Claude payload's `spend` object is the account's extra-usage (overage)
+  budget and carries BOTH `used` and `limit` (plus its own `percent`), so unlike Amp's bare `$`
+  balance it has an honest 0–100% bar. Two rules that look inconsistent with the rest of the
+  file but aren't: **(1) no `*_METER=1` flag.** The opt-in rule exists because a dead meter
+  still costs a ⌘ key to show nothing — this row costs nothing to LOOK at, because the sidebar
+  drops it while the balance is zero. And it must be on by default to do its job at all: the
+  point is to catch money you did NOT expect to be spending, which a flag you never set cannot
+  do. **(2) The sentinel is created from whether the account HAS a budget, never from the
+  balance.** Gating creation on `spent > 0` would mean the meter can only appear after someone
+  re-runs setup — i.e. never, since nobody re-runs setup because they suspect a charge they
+  don't know about. The zero case is handled at RENDER time: the poller writes `spend |none|`
+  every run while the balance is zero, and the sidebar's `isZeroSpend` drops it. That marker is
+  load-bearing — `scripts/check-secrets.sh` asserts BOTH the `"spend "` prefix and the `|none|`
+  marker, because losing the second one parks a permanent `€0.00` row on everyone.
+  `isClaudeMeter` still matches a hidden row (so it never leaks into the normal workspace list);
+  the panel filters with the separate `isClaudePanelRow`. **`extra_usage.utilization` sits right
+  next to `spend.percent` and is `null`** — read the wrong one and you'd conclude the data isn't
+  there, exactly like `seven_day_opus`. Never guess a currency symbol: `fmt_money` maps
+  EUR/USD/GBP and prints any other ISO code verbatim, and honours `exponent` so a zero-decimal
+  currency doesn't grow a fake decimal point.
+- **The usage poller caches its last good response (`CMUX_SENTINEL_USAGE_CACHE_TTL`, default
+  60s).** The documented way to use this tool — `--print` to look, then `--update` to paint — was
+  two API calls seconds apart on top of the 5-minute launchd poll, and that burst is what trips
+  the endpoint's 429. Only SUCCESSES are cached: a failed response is never written to the cache
+  and the next poll must retry the network, never replay the error. `TTL=0` disables it.
+  (What the row DISPLAYS during a failure is a separate question — see the grace bullet below.
+  The rule here is about never storing an error, and that is unchanged.) Cache file is `$USAGE_STATE_DIR/<provider>.last-response.json`, mode 600
+  (it is an account-scoped usage body — treat it like `--raw-full`).
+  **Probe the mtime with GNU `stat -c` FIRST, then BSD `stat -f` — the order is load-bearing and
+  getting it backwards is invisible on macOS.** The two flavours are NOT symmetric: BSD rejects
+  `-c` outright (empty stdout, clean fallback), but on Linux `-f` is a REAL flag meaning
+  `--file-system`, so a BSD-first probe prints a filesystem block, the `||` appends the true mtime
+  to it, and the digit check rejects the concatenation — the cache reads cold forever and every
+  burst is two API calls again. Shipped exactly that way: `make ci` was red for ten commits on
+  `main` while every local run passed 109/109, because the only failing assertion was one nobody
+  could reproduce on a Mac. `hooks/cmux-bridge.sh` already had the right order; the poller didn't.
+  Both flavours are now pinned on ANY platform by a `stat` stub in `tests/poller-gate.sh`
+  (`STUB_STAT=gnu|bsd`, unset delegates to the real binary) — reach for that stub before trusting
+  a green local run on anything mtime-shaped. Same lesson as the empty-read traps above: a suite
+  that passes on your OS is not evidence about the other one.
+- **A failed fetch keeps the numbers for a bounded, LABELLED grace window — and only 429 backs
+  off.** Reported 2026-08-31 from a second install: all three Claude rows sat on `⚠ rate limit`
+  while Claude Code's own `/usage` showed 6% / 50% / 63%. One 429 wipes every Claude row at once
+  (`mark_offline` paints the marker AND clears the native bar), and the next poll asked again five
+  minutes later on the exact cadence that earned the 429. The 60s burst cache cannot help: launchd's
+  interval is 300s, so it has always expired — by design, it only ever collapses a human
+  `--print`→`--update` burst. Two changes, deliberately shaped so the old rule survives:
+  **(1) grace.** `CMUX_SENTINEL_STALE_GRACE` (default 1800s, `0` = old behaviour) lets a failed
+  `--update` re-enter the NORMAL render with the stored last-good body — same bar, dot, model name,
+  spend logic, one proven code path — with only the detail text changing. It is never quiet: the
+  reset countdown is REPLACED by the age (`4% · 12m old`), no freshness is stamped, and the run still
+  exits non-zero with the reason in the launchd `.err`. So the doctor's stale warning (900s) fires
+  WHILE the rows still show numbers — that overlap is intended, not a bug: the panel stays useful and
+  the health report stays honest. The countdown is what gets sacrificed for width because `resets_at`
+  is absolute and stays correct while stale, whereas a percentage that looks live is the one that can
+  cost you money. Past the window the rows go back to `⚠`, which is what keeps this from being
+  "serve stale numbers forever". **(2) 429-only backoff.** `_backoff_arm` defers the next call by
+  10/20/40min (`CMUX_SENTINEL_BACKOFF_BASE`/`_MAX`, base `0` disables) and a success clears it. A 401
+  or a dead network is NOT backed off — retrying costs the endpoint nothing and recovers the instant
+  the user fixes it, so deferring those would only keep a meter dark. Backoff is `--update` only: a
+  human typing `--print` wants an answer, not a refusal from a state file. **Trap for whoever writes
+  the next test here:** two back-to-back runs in a test are inside the 60s burst cache, so the second
+  never reaches the stub curl and the case silently proves nothing — pass
+  `CMUX_SENTINEL_USAGE_CACHE_TTL=0` to get the production 300s shape. `reset` in
+  `tests/poller-gate.sh` must also delete the backoff file, or one case's 429 suppresses the next
+  case's fetch. Regression tests: `tests/poller-gate.sh` T13.
 - **A provider may not HAVE a window we model — and a dead meter is NOT free.** A sentinel is
   an ordinary workspace, so a permanently-`n/a` row still eats one of the ⌘1…⌘9 keys to show
   nothing. OpenAI dropped the **5h window for Codex Pro** — confirmed permanent 2026-07-16
@@ -425,6 +596,27 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   Complementing it, `bin/cmux-sentinel-doctor.sh` reads the plist's `StandardErrorPath` and prints the
   newest `ERR:` line under a stale provider, so "stale — and now what?" answers itself. Regression
   tests: `tests/poller-gate.sh` T7–T9, `tests/sentinel-doctor.sh` T8.
+- **`install.sh` FINISHES THE JOB — deploying files is not an install.** It used to copy files and
+  print six manual steps; step 1 (`cmux-sentinel-setup.sh`) is idempotent, fail-open and needs no
+  input, so leaving it manual bought nothing and cost everything: an UPDATE printed
+  "✅ Files installed" and changed nothing visible, because the new release's meters had no
+  workspaces. That is what a successful install looked like to the first person who updated.
+  Setup now runs automatically, then every enabled provider is painted and the sidebar reloaded.
+  **Because it is automatic, ITS failure modes are now the installer's** — all three steps are
+  best-effort and NON-FATAL (no cmux on PATH, a cmux that refuses, no creds), each with a printed
+  recovery, and `--no-setup`/`NO_SETUP=1` opts out. **`tests/install-hooks.sh` must pass
+  `NO_SETUP=1` on every invocation**: it sandboxes `$HOME` but NOT `$PATH`, so without it
+  `make test` reaches the developer's REAL cmux and creates REAL workspaces. T14 covers the
+  skip/failure paths deliberately.
+- **The installed version is stamped and reported.** `VERSION` in the repo → written to
+  `~/.config/cmux-sentinel/VERSION` (version + date + short sha) at install; the doctor prints it
+  and asks GitHub whether a newer one is published. Three constraints, each learned rather than
+  assumed: the remote check is **fail-silent on every can't-tell path** (offline, rate limited, an
+  HTML error page — a health report must never error because GitHub was slow); the comparison is
+  **numeric per component** (`sort -t. -k1,1n -k2,2n -k3,3n`, so `0.10.0 > 0.9.0`, which a string
+  compare gets wrong); and being **AHEAD** of the published version is not an update, or every dev
+  machine gets nagged to downgrade. `CMUX_SENTINEL_UPDATE_CHECK=0` disables it. Keep `CHANGELOG.md`
+  current with `VERSION` — the doctor's warning points at it.
 - **launchd does not reread a changed loaded plist.** `install.sh` compares generated plist content,
   leaves unchanged jobs alone, and by default prints exact `bootout` + `bootstrap` commands for a
   changed+loaded job. `--reload-agents` / `RELOAD_AGENTS=1` explicitly performs only those targeted
@@ -444,6 +636,43 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
   returns "already wired" without touching the file. **Render-then-compare before you write** is the
   rule for every generated file here (the plist path always did it).
   Covered by `tests/install-hooks.sh` T12 + T13.
+
+## Homebrew packaging (the tap)
+
+The formula is a thin wrapper around what already exists — `install.sh` stays the ONE deployer.
+Four things about it are non-obvious and each is a silent failure if you get it wrong:
+
+- **`libexec.install Dir["*"]` — stage the WHOLE tree, not just `bin/`.** `install.sh` finds its
+  payload relative to itself (it probes for `bin/cmux-claude-usage.sh` beside it), so a tree in
+  `libexec` runs unmodified. That is why there is no second deployer to keep in sync.
+- **`bin.write_exec_script`, never `bin.install_symlink`.** Through a symlink the dispatcher's `$0`
+  stays in the prefix's `bin/`, where no `cmux-*.sh` helper lives, and every command fails to
+  resolve. The generated wrapper `exec`s the real `libexec` path, so candidate #1 (beside the
+  script) finds them. Pinned by `tests/entrypoint.sh` T7, which builds the layout by hand.
+- **The launchd plists must keep pointing at `~/bin/*.sh`, never into the Cellar.** A Cellar path
+  carries the version, so `brew upgrade` would break every loaded agent — and launchd holds its
+  loaded definition, so the breakage is silent until the next reboot. This is also why `brew` alone
+  cannot finish an upgrade: `cmux-sentinel deploy` re-runs the installer from the Cellar tree and
+  refreshes `~/bin`. `update` REFUSES on a brew-managed copy (`*/Cellar/cmux-sentinel/*`) and names
+  `brew upgrade` instead, so two updaters can't fight over `~/bin`.
+- **The version stamp must not borrow an ancestor repo's git sha.** `git -C <dir> rev-parse` walks
+  UP, and a formula unpacks under `/opt/homebrew`, which is itself a git repo — so the unguarded
+  call stamped **Homebrew's** HEAD: a precise, confident, entirely unrelated sha. `install.sh` now
+  trusts a sha only when `--show-toplevel` equals the tree it is installing from, and records
+  `commit=unknown` otherwise (`tests/install-hooks.sh` T15).
+- **`cmux-sentinel version` reports BOTH numbers on a brew install** — the deployed stamp (what
+  launchd runs) and the Cellar version (what you just typed) — and warns when they differ. Print
+  one and "I upgraded" / "it's still broken" are both true with no way to see it.
+- **The "now run deploy" message goes in `post_install`, not `caveats`.** Homebrew prints `caveats`
+  only on the FIRST install — and the upgrade is exactly when the message matters.
+
+`make formula` (in `make check` and `ci`) keeps the committed formula honest, **offline**. It keys
+on whether the version is TAGGED, not merely on whether it matches: the formula describes the LAST
+RELEASE, so between a version bump and its tag it is legitimately behind — gating on equality alone
+would fail the release commit itself. Once `v$VERSION` exists locally, regenerating is mandatory.
+A missing formula is "not released yet"; a formula AHEAD of `VERSION` always fails (a bad revert).
+A shallow CI checkout has no tags and lands in the lenient arm — the gate that matters runs locally,
+where releases are cut.
 
 ## Conventions & security
 

@@ -55,6 +55,24 @@ if [ -f sidebars/workspaces.swift ] \
   && ! grep -Eq 'w\.title\.hasPrefix\("(5h|7d) "\)' sidebars/workspaces.swift; then
   flag "sidebar is missing its isClaudeMeter title anchors (w.title.hasPrefix)" "sidebars/workspaces.swift"
 fi
+# The opt-in per-model row (CLAUDE_MODEL_METER=1) ships its anchor unconditionally
+# for the same reason ampo does: opting in creates a sentinel, and a sentinel with
+# no anchor is an invisible workspace eating a ⌘ key.
+if [ -f sidebars/workspaces.swift ] \
+  && ! grep -Eq 'w\.title\.hasPrefix\("m7d "\)' sidebars/workspaces.swift; then
+  flag "sidebar is missing its per-model meter title anchor (w.title.hasPrefix)" "sidebars/workspaces.swift"
+fi
+# The spend row needs BOTH anchors: the meter prefix (so it never leaks into the
+# normal workspace list) and the |none| marker (so a zero balance stays hidden).
+# Losing the second one would park a permanent "€0.00" row on everyone.
+if [ -f sidebars/workspaces.swift ] \
+  && ! grep -Eq 'w\.title\.hasPrefix\("spend "\)' sidebars/workspaces.swift; then
+  flag "sidebar is missing its spend meter title anchor (w.title.hasPrefix)" "sidebars/workspaces.swift"
+fi
+if [ -f sidebars/workspaces.swift ] \
+  && ! grep -Eq 'w\.title\.hasPrefix\("spend \|none\|"\)' sidebars/workspaces.swift; then
+  flag "sidebar lost the zero-spend marker — a €0.00 row would show for everyone" "sidebars/workspaces.swift"
+fi
 # Same for the Codex provider — a clobber that dropped isCodexMeter would silently
 # kill the CODEX USAGE panel for everyone who opted in.
 if [ -f sidebars/workspaces.swift ] \
@@ -67,6 +85,22 @@ fi
 if [ -f sidebars/workspaces.swift ] \
   && ! grep -Eq 'w\.title\.hasPrefix\("amp(u|o) "\)' sidebars/workspaces.swift; then
   flag "sidebar is missing its isAmpMeter title anchors (w.title.hasPrefix)" "sidebars/workspaces.swift"
+fi
+
+# Every meter label must also have a DISPLAY NAME. Adding a label to a predicate
+# but not to meterWindow() renders an anonymous "usage" row — which looks
+# deliberate rather than broken, so it ships. It did: the per-model row went out
+# reading "usage" instead of "model". Each label appears once in its predicate and
+# once in meterWindow, so a count below 2 means the name is missing.
+if [ -f sidebars/workspaces.swift ]; then
+  labels="$(grep -o 'hasPrefix("[^ "]* ")' sidebars/workspaces.swift \
+            | sed 's/hasPrefix("//; s/ ")//' | sort -u)"
+  for lbl in $labels; do
+    n="$(grep -c "hasPrefix(\"$lbl \")" sidebars/workspaces.swift)"
+    [ "$n" -ge 2 ] && continue
+    flag "meter label '$lbl' has no name in meterWindow() — it renders a generic \"usage\" row" \
+         "sidebars/workspaces.swift"
+  done
 fi
 
 if [ "$fail" -ne 0 ]; then

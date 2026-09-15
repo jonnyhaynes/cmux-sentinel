@@ -17,6 +17,12 @@
 #         SENTINEL_LAYOUT=0 (or --no-layout) skips the shortcut layout pass.
 set -uo pipefail
 
+# cmux prints a one-time deprecation notice for legacy verbs (rename-workspace →
+# workspace rename) on STDERR. Anything that CAPTURES cmux stderr to explain a
+# failure gets that notice at the front of the reason, where it reads as the cause
+# — it buried a real "Command timed out" once. cmux documents this switch for it.
+export CMUX_QUIET=1
+
 LAYOUT="${SENTINEL_LAYOUT:-1}"
 for a in "$@"; do
   case "$a" in
@@ -31,6 +37,8 @@ SENTINELS_ENV="$CFG/usage-sentinels.env"
 # shellcheck disable=SC1090
 [ -f "$SENTINELS_ENV" ] && . "$SENTINELS_ENV"
 LABEL_5H="${SENTINEL_5H_LABEL:-5h}";   LABEL_7D="${SENTINEL_7D_LABEL:-7d}"
+LABEL_M7D="${SENTINEL_M7D_LABEL:-m7d}"
+LABEL_SPEND="${SENTINEL_SPEND_LABEL:-spend}"
 LABEL_CC5H="${SENTINEL_CC5H_LABEL:-cc5h}"; LABEL_CC7D="${SENTINEL_CC7D_LABEL:-cc7d}"
 LABEL_CX5H="${SENTINEL_CX5H_LABEL:-cx5h}"; LABEL_CX7D="${SENTINEL_CX7D_LABEL:-cx7d}"
 LABEL_AMPU="${SENTINEL_AMPU_LABEL:-ampu}"; LABEL_AMPO="${SENTINEL_AMPO_LABEL:-ampo}"
@@ -76,6 +84,7 @@ ensure() { # $1 = label  $2 = description
 # empty preserves its normal modeled windows. Only a POSITIVE answer suppresses a
 # normal sentinel. Optional meters (Amp orbs) still require their local opt-in.
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLAUDE_POLLER="${CLAUDE_POLLER:-$SELF_DIR/cmux-claude-usage.sh}"
 CODEX_POLLER="${CODEX_POLLER:-$SELF_DIR/cmux-codex-usage.sh}"
 AMP_POLLER="${AMP_POLLER:-$SELF_DIR/cmux-amp-usage.sh}"
 COMMANDCODE_POLLER="${COMMANDCODE_POLLER:-$SELF_DIR/cmux-commandcode-usage.sh}"
@@ -105,6 +114,29 @@ case " $PROVIDERS " in *" commandcode "*)
 case " $PROVIDERS " in *" claude "*)
   ensure "$LABEL_5H" "Claude 5-hour rate meter — managed by cmux-claude-usage.sh; leave idle"
   ensure "$LABEL_7D" "Claude weekly rate meter — managed by cmux-claude-usage.sh; leave idle"
+  # Per-model weekly cap (Fable et al). Opt-in for the same reason as Amp orbs: the
+  # row costs one of the ⌘1…⌘9 keys, and most accounts don't watch a second cap.
+  # The two normal meters deliberately stay on plain `ensure` — asking the poller
+  # must never be able to suppress a proven-working meter.
+  cl_live=$(live_buckets "$CLAUDE_POLLER")
+  if [ "${CLAUDE_MODEL_METER:-0}" = 1 ]; then
+    ensure_live "$LABEL_M7D" "Claude per-model weekly meter — managed by cmux-claude-usage.sh; leave idle" "$cl_live"
+  else
+    # Opt-in meters skip SILENTLY, which means someone who actually HAS a per-model
+    # cap never learns the row exists — they just don't see it and assume it's
+    # broken. So ask the poller what the answer WOULD be with the flag on (a
+    # read-only probe; the response cache makes it free) and mention it only when
+    # there is a real cap to meter. No cap, no noise.
+    if printf '%s\n' "$(CLAUDE_MODEL_METER=1 live_buckets "$CLAUDE_POLLER")" | grep -qxF -- "$LABEL_M7D"; then
+      echo "  i your account HAS a per-model weekly cap, but '$LABEL_M7D' is opt-in — add"
+      echo "    CLAUDE_MODEL_METER=1 to ~/.config/cmux/usage-sentinels.env and re-run to meter it"
+    fi
+  fi
+  # Extra-usage SPEND. Created whenever the account has an overage budget — a stable
+  # account property, NOT the balance. This is the one meter with no opt-in flag,
+  # because the sidebar hides the row while the balance is zero: it costs nothing to
+  # look at, and a flag you never set could never warn you about an unexpected charge.
+  ensure_live "$LABEL_SPEND" "Claude extra-usage spend meter — managed by cmux-claude-usage.sh; leave idle" "$cl_live"
   ;; esac
 case " $PROVIDERS " in *" codex "*)
   cx_live=$(live_buckets "$CODEX_POLLER")
@@ -150,7 +182,7 @@ case " $PROVIDERS " in *" amp "*)
 # Every label the sidebar hides — including disabled providers' leftovers, which
 # still exist as workspaces and still eat ⌘ keys. Array, not a string: a label is
 # user-configurable and could contain a space.
-ALL_LABELS=("$LABEL_5H" "$LABEL_7D" "$LABEL_CC5H" "$LABEL_CC7D" "$LABEL_CX5H" "$LABEL_CX7D" "$LABEL_AMPU" "$LABEL_AMPO")
+ALL_LABELS=("$LABEL_5H" "$LABEL_7D" "$LABEL_M7D" "$LABEL_SPEND" "$LABEL_CC5H" "$LABEL_CC7D" "$LABEL_CX5H" "$LABEL_CX7D" "$LABEL_AMPU" "$LABEL_AMPO")
 labels_json() { printf '%s\n' "${ALL_LABELS[@]}" | jq -R . | jq -s .; }
 
 ws_json() { # $1 = window ("" = default)
