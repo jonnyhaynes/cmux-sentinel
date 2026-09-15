@@ -8,7 +8,9 @@
 # group.name on the group header, but a custom sidebar gets NO group data at all —
 # proven: `extension.sidebar.snapshot` carries no group fields, and the sidebar
 # interpreter exposes no `groups` binding (probed 2026-06-19, see
-# .claude/research/2026-06-19-workspace-group-names-in-sidebar.md). The only
+# .claude/research/2026-06-19-workspace-group-names-in-sidebar.md). cmux 0.64.23
+# added a `groups` binding and the sidebar now reads names from it, so this sync
+# only matters on older cmux (the doctor calls it redundant on 0.64.23+). The only
 # per-workspace channel a custom sidebar CAN read is the TITLE — the same lever the
 # usage meters and the agent-state bridge already ride. So this poller reads
 # `cmux workspace-group list` and renames each group's ANCHOR workspace to the
@@ -34,6 +36,12 @@
 # unambiguous.
 
 set -uo pipefail
+
+# cmux prints a one-time deprecation notice for legacy verbs (rename-workspace →
+# workspace rename) on STDERR. Anything that CAPTURES cmux stderr to explain a
+# failure gets that notice at the front of the reason, where it reads as the cause
+# — it buried a real "Command timed out" once. cmux documents this switch for it.
+export CMUX_QUIET=1
 
 SENTINELS_ENV="$HOME/.config/cmux/usage-sentinels.env"
 # shellcheck disable=SC1090
@@ -80,7 +88,12 @@ main() {
 
   if [ "$mode" = "--update" ]; then
     if [ "$GROUP_NAME_SYNC" != "1" ]; then
-      echo "group-name sync disabled (set GROUP_NAME_SYNC=1 in $SENTINELS_ENV) — nothing to do" >&2
+      # Only a HUMAN needs to hear this. launchd runs --update every 5 minutes and
+      # captures stderr, so an unconditional notice wrote 3259 identical lines /
+      # 400KB (~12MB a year) into the .err of a feature that is OFF BY DEFAULT —
+      # and buried any real error in it. The plist calls itself "dormant unless
+      # enabled"; this is what actually makes that true.
+      [ -t 2 ] && echo "group-name sync disabled (set GROUP_NAME_SYNC=1 in $SENTINELS_ENV) — nothing to do" >&2
       exit 0
     fi
     cmux ping &>/dev/null || die "cmux socket rejected (restart cmux to apply socketControlMode=automation)"

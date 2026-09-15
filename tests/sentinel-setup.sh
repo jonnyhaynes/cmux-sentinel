@@ -104,13 +104,19 @@ seed() { local i=0 t; : > "$WSLIST.raw"; for t in "$@"; do printf '%s\n' "$t" >>
          jq -R -s -c 'split("\n") | map(select(length>0)) | {workspaces: [to_entries[] | {index: .key, ref: ("w" + (.key+1|tostring)), title: .value}]}' "$WSLIST.raw" > "$WSLIST"; rm -f "$WSLIST.raw"; }
 titles() { jq -r '[.workspaces[].title] | join("|")' "$WSLIST" 2>/dev/null; }   # current order
 
-echo "T1: providers=claude → creates 5h + 7d only"
+echo "T1: providers=claude → creates 5h + 7d (+ the always-on spend row)"
 reset
 USAGE_PROVIDERS="claude" bash "$SETUP" >/dev/null 2>&1; ck "exit 0" [ "$?" = 0 ]
 ck  "created 5h"  created 5h
 ck  "created 7d"  created 7d
 ckn "did not create cx5h (codex disabled)" created cx5h
-ck  "exactly 2 created" [ "$(ncreated)" = 2 ]
+ckn "did not create m7d (per-model meter is opt-in)" created m7d
+# The real poller can't reach an API from this fake $HOME, so it can't tell us
+# whether the account has an overage budget — and silence never suppresses a
+# sentinel. The row stays invisible until money is actually spent, so failing open
+# here costs nothing; failing closed could hide a charge.
+ck  "created spend (fails open, and hides itself when there's nothing to show)" created spend
+ck  "exactly 3 created" [ "$(ncreated)" = 3 ]
 
 echo "T2: providers=\"claude codex\" → creates all four"
 # $HOME/PATH have no logged-in Codex CLI, so the real poller can't tell us
@@ -178,11 +184,97 @@ ampo
 USAGE_PROVIDERS="amp" AMP_ORB_METER=1 AMP_POLLER="$ROOT/bin/poller" bash "$SETUP" >/dev/null 2>&1
 ck "created ampu with orb opt-in" created ampu
 ck "created ampo with orb opt-in" created ampo
+
+# The per-model Claude cap follows the SAME local-opt-in policy as the orb meter:
+# the flag is the user's positive request, and the poller then says whether the
+# account actually has such a cap.
+echo "T2h: CLAUDE_MODEL_METER=1 + the account has a per-model cap → creates m7d"
+reset
+stub_poller '5h
+7d
+m7d
+'
+USAGE_PROVIDERS="claude" CLAUDE_MODEL_METER=1 CLAUDE_POLLER="$ROOT/bin/poller" bash "$SETUP" >/dev/null 2>&1
+ck "created 5h" created 5h
+ck "created 7d" created 7d
+ck "created m7d with the model-meter opt-in" created m7d
+
+echo "T2i: opted in but the account has NO per-model cap → m7d skipped"
+reset
+stub_poller '5h
+7d
+'
+out=$(USAGE_PROVIDERS="claude" CLAUDE_MODEL_METER=1 CLAUDE_POLLER="$ROOT/bin/poller" bash "$SETUP" 2>&1)
+ckn "did not create a permanently-n/a m7d row" created m7d
+ckhas "explains the skip" "$out" "skipping 'm7d'"
+ck  "the account-wide meters are unaffected" created 7d
+
+echo "T2j: opted in but the poller can't tell → FAILS OPEN, creates m7d"
+reset
+stub_poller ''
+USAGE_PROVIDERS="claude" CLAUDE_MODEL_METER=1 CLAUDE_POLLER="$ROOT/bin/poller" bash "$SETUP" >/dev/null 2>&1
+ck "created m7d (silence must never suppress an explicitly requested meter)" created m7d
+
+echo "T2k: a live per-model cap without the opt-in still creates nothing"
+reset
+stub_poller '5h
+7d
+m7d
+'
+USAGE_PROVIDERS="claude" CLAUDE_POLLER="$ROOT/bin/poller" bash "$SETUP" >/dev/null 2>&1
+ckn "the cap existing is not consent to spend a ⌘ key on it" created m7d
+
+# ...but it must SAY so. An opt-in meter that skips silently means someone who
+# actually has a per-model cap never learns the row exists — they just don't see
+# it and conclude the tool is broken. (That is exactly what happened to the first
+# user who updated: "it's probably fixed but I don't have Fable there".)
+echo "T2k2: an opt-in meter you could be using announces itself, once"
+reset
+cat > "$ROOT/bin/poller" <<'MODELPOLLER'
+#!/bin/bash
+[ "$1" = --buckets ] || exit 2
+printf '5h\n7d\n'
+[ "${CLAUDE_MODEL_METER:-0}" = 1 ] && printf 'm7d\n'
+exit 0
+MODELPOLLER
+chmod +x "$ROOT/bin/poller"
+out=$(USAGE_PROVIDERS="claude" CLAUDE_POLLER="$ROOT/bin/poller" bash "$SETUP" 2>&1)
+ckn "still does not create it without the opt-in" created m7d
+ckhas "tells you the cap exists" "$out" "HAS a per-model weekly cap"
+ckhas "tells you exactly how to turn it on" "$out" "CLAUDE_MODEL_METER=1"
+
+echo "T2k3: no per-model cap → no advice about one"
+reset
+stub_poller '5h
+7d
+'
+out=$(USAGE_PROVIDERS="claude" CLAUDE_POLLER="$ROOT/bin/poller" bash "$SETUP" 2>&1)
+ckn "no cap, no sentinel" created m7d
+case "$out" in *"per-model weekly cap"*) bad "advertised a meter this account cannot use" ;;
+  *) ok "silent when there is nothing to opt into" ;; esac
+
+# The spend meter is the ONE row with no opt-in flag: the sidebar hides it while
+# the balance is zero, so it costs nothing to look at — and a flag you never set
+# could never warn you about a charge you didn't expect.
+echo "T2l: the spend sentinel needs no opt-in, but does need an overage budget"
+reset
+stub_poller '5h
+7d
+spend
+'
+USAGE_PROVIDERS="claude" CLAUDE_POLLER="$ROOT/bin/poller" bash "$SETUP" >/dev/null 2>&1
+ck "created spend with no flag at all" created spend
+reset
+stub_poller '5h
+7d
+'
+USAGE_PROVIDERS="claude" CLAUDE_POLLER="$ROOT/bin/poller" bash "$SETUP" >/dev/null 2>&1
+ckn "no overage budget → no spend sentinel" created spend
 rm -f "$ROOT/bin/poller"
 
 echo "T3: idempotent — existing sentinels are left alone"
 reset
-seed "5h x" "7d x" "cx5h x" "cx7d x"
+seed "5h x" "7d x" "spend |none|" "cx5h x" "cx7d x"
 out=$(USAGE_PROVIDERS="claude codex" bash "$SETUP" 2>&1); rc=$?
 ck "exit 0" [ "$rc" = 0 ]
 ck "created nothing (all exist)" [ "$(ncreated)" = 0 ]
@@ -201,14 +293,14 @@ ckhas "ON → warns" "$out" "may be ON"
 # workspaces. Meters interleaved among reals is the state that steals keys.
 echo "T5: layout parks meters below the list and anchors ⌘9 on the last real"
 reset
-seed a b c d e "cx7d ▎ 3%" "cx5h n/a" f g h i j k "5h ███ 41%" l "7d ██ 58%"
+seed a b c d e "cx7d ▎ 3%" "cx5h n/a" f g h i j k "5h ███ 41%" l "7d ██ 58%" "spend |none|"
 out=$(USAGE_PROVIDERS="claude codex" bash "$SETUP" 2>&1)
 ck "created nothing (all exist)" [ "$(ncreated)" = 0 ]
 ckhas "reported parking" "$out" "parked"
 ckhas "reported ⌘9 anchor" "$out" "anchored"
 at() { jq -r --argjson i "$1" '.workspaces[$i].title // ""' "$WSLIST"; }   # title at index
 ck "real workspaces keep their relative order" \
-   [ "$(jq -r '[.workspaces[].title | select(test("^(5h|7d|cx5h|cx7d)( |$)") | not)] | join("|")' "$WSLIST")" \
+   [ "$(jq -r '[.workspaces[].title | select(test("^(5h|7d|m7d|spend|cx5h|cx7d)( |$)") | not)] | join("|")' "$WSLIST")" \
      = "a|b|c|d|e|f|g|h|i|j|k|l" ]
 # ⌘1…⌘8 = indices 0-7
 for i in 0 1 2 3 4 5 6 7; do
@@ -217,9 +309,9 @@ for i in 0 1 2 3 4 5 6 7; do
 done
 # ⌘9 = last workspace
 last=$(jq -r '.workspaces[-1].title' "$WSLIST")
-case "$last" in 5h*|7d*|cx5h*|cx7d*) bad "Cmd+9 hits a meter ($last)" ;; *) ok "Cmd+9 → real ($last)" ;; esac
-ck "all four meters sit in the keyless band (indices 8…count-2)" \
-   [ "$(jq -r '[.workspaces[8:-1][] | select(.title | test("^(5h|7d|cx5h|cx7d)( |$)"))] | length' "$WSLIST")" = 4 ]
+case "$last" in 5h*|7d*|m7d*|spend*|cx5h*|cx7d*) bad "Cmd+9 hits a meter ($last)" ;; *) ok "Cmd+9 → real ($last)" ;; esac
+ck "all five meters sit in the keyless band (indices 8…count-2)" \
+   [ "$(jq -r '[.workspaces[8:-1][] | select(.title | test("^(5h|7d|m7d|spend|cx5h|cx7d)( |$)"))] | length' "$WSLIST")" = 5 ]
 
 echo "T6: layout is idempotent — a second run converges to the same order"
 before=$(titles)

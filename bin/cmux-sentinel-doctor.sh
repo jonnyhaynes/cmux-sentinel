@@ -7,6 +7,12 @@
 # No secrets here: sentinels are resolved by their title label at runtime.
 set -u
 
+# cmux prints a one-time deprecation notice for legacy verbs (rename-workspace →
+# workspace rename) on STDERR. Anything that CAPTURES cmux stderr to explain a
+# failure gets that notice at the front of the reason, where it reads as the cause
+# — it buried a real "Command timed out" once. cmux documents this switch for it.
+export CMUX_QUIET=1
+
 CFG="$HOME/.config/cmux"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fails=0; warns=0
@@ -34,20 +40,74 @@ check_launchd_job() { # $1=provider  $2=job label
 
 echo "cmux-sentinel doctor"
 
+# ── version ───────────────────────────────────────────────────────────────────
+# "Is the fix in my copy?" used to cost the maintainer a chat round-trip. The
+# installer stamps what it deployed; this reports it, and (unless you turn it off)
+# asks GitHub whether something newer exists. The remote check is deliberately
+# quick and FAIL-SILENT: an offline machine, a rate-limited raw.githubusercontent,
+# or a moved file must never turn a health report into an error.
+VERSION_FILE="$HOME/.config/cmux-sentinel/VERSION"
+ver_gt() { # $1 newer than $2?
+  [ "$1" = "$2" ] && return 1
+  [ "$(printf '%s\n%s\n' "$1" "$2" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)" = "$2" ]
+}
+if [ -f "$VERSION_FILE" ]; then
+  # shellcheck disable=SC1090
+  inst_ver="$(sed -n 's/^version=//p' "$VERSION_FILE" | head -1)"
+  inst_on="$(sed -n 's/^installed=//p' "$VERSION_FILE" | head -1)"
+  inst_sha="$(sed -n 's/^commit=//p' "$VERSION_FILE" | head -1)"
+  note "cmux-sentinel v${inst_ver:-?} (installed ${inst_on:-?}${inst_sha:+, $inst_sha})"
+  if [ "${CMUX_SENTINEL_UPDATE_CHECK:-1}" = 1 ] && have curl && [ -n "$inst_ver" ]; then
+    latest="$(curl -fsS --max-time 3 \
+      https://raw.githubusercontent.com/oliver-kriska/cmux-sentinel/main/VERSION 2>/dev/null \
+      | tr -d '[:space:]')"
+    case "$latest" in
+      ''|*[!0-9.]*) : ;;   # unreachable or not a version — say nothing
+      *) if ver_gt "$latest" "$inst_ver"; then
+           warn "v$latest is available (you have v$inst_ver) — see CHANGELOG.md; update with: curl -fsSL https://raw.githubusercontent.com/oliver-kriska/cmux-sentinel/main/install.sh | bash"
+         fi ;;
+    esac
+  fi
+else
+  note "no version stamp — installed before v0.2.0, or copied by hand; re-run install.sh to record one"
+fi
+
+# cmux ≥ 0.64.23 binds `workspaces[i].agents` (native agent state) and `groups`
+# into the sidebar. Both are feature-gated on the VERSION because the interpreter
+# can't be asked: an unset binding renders exactly like an absent one. An
+# unreadable version means "can't tell" → no claims either way.
+NATIVE_SIDEBAR_DATA=0.64.23
+cmux_ver=""
+have cmux && cmux_ver="$(cmux --version 2>/dev/null | sed -nE 's/^cmux ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -1)"
+native_data=0
+[ -n "$cmux_ver" ] && ! ver_gt "$NATIVE_SIDEBAR_DATA" "$cmux_ver" && native_data=1
+SIDEBAR_FILE="$CFG/sidebars/workspaces.swift"
+sidebar_reads() { [ -f "$SIDEBAR_FILE" ] && grep -qF -- "$1" "$SIDEBAR_FILE"; }
+
 echo "• cmux"
 if have cmux; then
-  if cmux ping &>/dev/null; then ok "cmux present and responding"
+  if cmux ping &>/dev/null; then ok "cmux present and responding${cmux_ver:+ (v$cmux_ver)}"
   else bad "cmux installed but 'cmux ping' failed — is the app running?"; fi
 else bad "cmux not on PATH"; fi
 
 echo "• sidebar"
-if [ -f "$CFG/sidebars/workspaces.swift" ]; then
+if [ -f "$SIDEBAR_FILE" ]; then
   ok "sidebar deployed at ~/.config/cmux/sidebars/workspaces.swift"
   if have cmux && cmux sidebar validate workspaces &>/dev/null; then ok "sidebar interprets against validate's synthetic data"
   else warn "sidebar did not validate — run: cmux sidebar validate workspaces"; fi
-  if grep -Eq 'w\.title\.hasPrefix\("(5h|7d) "\)' "$CFG/sidebars/workspaces.swift"; then :
+  if grep -Eq 'w\.title\.hasPrefix\("(5h|7d) "\)' "$SIDEBAR_FILE"; then :
   else warn "deployed sidebar is missing its isClaudeMeter title anchors — usage panel won't render"; fi
+  if [ "$native_data" = 1 ] && ! sidebar_reads 'w.agents'; then
+    note "cmux v$cmux_ver can feed native agent state + group names to the sidebar, but the deployed one predates it — re-run install.sh"
+  fi
 else bad "sidebar not deployed (run ./install.sh)"; fi
+# cmux 0.64.23 added `.js` sidebars, and for ONE base name `.js` beats `.swift`
+# (which beats `.json`). cmux's own examples ship a `workspaces.js` — our exact
+# name — so copying that example silently swaps this sidebar out, with every check
+# above still green. Only `.js` shadows us; a `workspaces.json` loses to `.swift`.
+if [ -f "$CFG/sidebars/workspaces.js" ]; then
+  warn "sidebars/workspaces.js SHADOWS workspaces.swift (.js wins) — cmux is not showing this sidebar; rename it: mv ~/.config/cmux/sidebars/workspaces.js ~/.config/cmux/sidebars/my-workspaces.js"
+fi
 
 echo "• working-state bridge"
 inst="$HOME/.claude/hooks/cmux-bridge.sh"
@@ -75,8 +135,15 @@ if [ -f "$inst" ]; then
   else warn "can't check hook registration (need ~/.claude/settings.json + jq)"; fi
 elif [ -f "$amp_bridge_file" ]; then
   note "Claude bridge not installed — expected for an Amp-only setup"
+elif [ "$native_data" = 1 ] && sidebar_reads 'w.agents'; then
+  # Not a warning any more: cmux's own hooks already light up "Working…" for every
+  # agent it integrates. What only the bridge adds is ⏳ and Claude's precise ❓.
+  note "no bridge installed — Working… still comes from cmux's native agent state; add --with-bridge for ⏳ compacting and Claude's ❓ asking"
 else
   warn "no agent-state bridge installed — working/compacting rows are off (use --with-bridge or --with-amp)"
+fi
+if [ "$native_data" = 1 ] && sidebar_reads 'w.agents'; then
+  ok "sidebar also reads cmux's native agent state (Codex, opencode, Amp, … without adapters)"
 fi
 if [ -f "$amp_bridge_file" ]; then
   ok "Amp shared bridge installed at ~/.config/cmux-sentinel/cmux-bridge.sh"
@@ -110,6 +177,7 @@ envf="$CFG/usage-sentinels.env"
 # shellcheck disable=SC1090
 [ -f "$envf" ] && . "$envf"
 lbl5="${SENTINEL_5H_LABEL:-5h}"; lbl7="${SENTINEL_7D_LABEL:-7d}"
+lblm7d="${SENTINEL_M7D_LABEL:-m7d}"; lblspend="${SENTINEL_SPEND_LABEL:-spend}"
 providers="${USAGE_PROVIDERS:-claude}"
 usage_state_dir="${CMUX_SENTINEL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/cmux-sentinel}/usage"
 stale_after="${USAGE_STALE_AFTER_SECONDS:-900}"
@@ -225,15 +293,27 @@ else
 fi
 
 if have cmux && have jq; then
-  for lbl in "$lbl5" "$lbl7"; do
+  # m7d (the per-model weekly cap) is metered only when CLAUDE_MODEL_METER=1 —
+  # same local opt-in policy as the Amp orb meter, and for the same reason: an
+  # unmetered sentinel reads 'n/a' forever while still eating a ⌘ key.
+  for lbl in "$lbl5" "$lbl7" "$lblm7d" "$lblspend"; do
+    lbl_metered=1
+    [ "$lbl" = "$lblm7d" ] && [ "${CLAUDE_MODEL_METER:-0}" != 1 ] && lbl_metered=0
     rw="$(resolve_ref "$lbl")"; IFS=$'\t' read -r ref ref_win <<<"$rw"
     where="$ref"; [ -n "$ref_win" ] && where="$where in window $ref_win"
     close_cmd="$(close_hint "$ref" "$ref_win")"
     if [ -n "$ref" ]; then
-      if [ "$claude_on" = 1 ] && [ "$claude_inst" = 1 ]; then ok "'$lbl' sentinel present ($where)"
-      else warn "'$lbl' sentinel present ($where) but claude is off/uninstalled — close it to hide the panel: $close_cmd"; fi
+      if [ "$claude_on" != 1 ] || [ "$claude_inst" != 1 ]; then warn "'$lbl' sentinel present ($where) but claude is off/uninstalled — close it to hide the panel: $close_cmd"
+      elif [ "$lbl" = "$lblspend" ]; then ok "'$lbl' sentinel present ($where) — hidden by the sidebar until you actually spend"
+      elif [ "$lbl_metered" = 0 ]; then warn "'$lbl' sentinel present ($where) but it isn't metered (CLAUDE_MODEL_METER is off) — it'll read 'n/a' forever and still eats a ⌘ key: $close_cmd"
+      else ok "'$lbl' sentinel present ($where)"; fi
     else
-      if [ "$claude_on" = 1 ] && [ "$claude_inst" = 1 ]; then warn "no '$lbl' sentinel (title \"$lbl\" or starting \"$lbl \") — create it: $HERE/cmux-sentinel-setup.sh"
+      # "correct, it isn't metered" answers the wrong question for someone who WANTS
+      # the row and can't work out why it never appeared. Name the switch.
+      if [ "$lbl" = "$lblm7d" ] && [ "$lbl_metered" = 0 ]; then
+        ok "no '$lbl' sentinel — the per-model meter is off; set CLAUDE_MODEL_METER=1 in $envf and re-run $HERE/cmux-sentinel-setup.sh to meter it (see cmux-claude-usage.sh --print for whether you have such a cap)"
+      elif [ "$lbl_metered" = 0 ]; then ok "no '$lbl' sentinel — correct, it isn't metered"
+      elif [ "$claude_on" = 1 ] && [ "$claude_inst" = 1 ]; then warn "no '$lbl' sentinel (title \"$lbl\" or starting \"$lbl \") — create it: $HERE/cmux-sentinel-setup.sh"
       else ok "no '$lbl' sentinel — panel hidden by design (claude off/uninstalled)"; fi
     fi
   done
@@ -436,7 +516,7 @@ else warn "cmux or jq unavailable — can't check Command Code sentinels"; fi
 # drag-reordering; see CLAUDE.md.)
 echo "• ⌘N shortcut layout"
 if have cmux && have jq; then
-  lay_labels="$(printf '%s\n' "$lbl5" "$lbl7" "$lblcc5" "$lblcc7" "$lblcx5" "$lblcx7" "$lblampu" "$lblampo" | jq -R . | jq -s .)"
+  lay_labels="$(printf '%s\n' "$lbl5" "$lbl7" "$lblm7d" "$lblspend" "$lblcc5" "$lblcc7" "$lblcx5" "$lblcx7" "$lblampu" "$lblampo" | jq -R . | jq -s .)"
   # The rows cmux actually numbers for ⌘1…⌘9 — kept identical to the copy in
   # bin/cmux-sentinel-setup.sh (setup parks by it, the doctor reports drift off it).
   # Since 0.64.22 (#9176) ⌘N indexes the ORDINARY sidebar rows, so a group ANCHOR
@@ -448,7 +528,7 @@ if have cmux && have jq; then
       + [ $gs[]? | select(.is_collapsed == true) | .member_workspace_refs[]? ] ) as $x
     | [ .workspaces | sort_by(.index)[] | select( .ref as $r | ($x | index($r)) == null ) ];'
   check_layout() { # $1 = window id; empty means default-window fallback
-    local win="$1" ctx="" lay grp eaten n_ws n_meters first_meter slack
+    local win="$1" ctx="" lay grp eaten n_ws n_meters first_meter slack short
     if [ -n "$win" ]; then
       lay="$(cmux workspace list --window "$win" --json 2>/dev/null)"; ctx=" in window $win"
       grp="$(cmux workspace-group list --window "$win" --json 2>/dev/null)"
@@ -470,6 +550,15 @@ if have cmux && have jq; then
             | .key
             | if . == $n - 1 then "⌘9" elif . <= 7 then "⌘\(. + 1)" else empty end ]
         | unique | join(", ")' 2>/dev/null)"
+    # Fewer numbered REAL workspaces than keyed rows means some meter MUST hold a key:
+    # 8 reals + meters give 9 keys only 8 owners. Setup's best layout (⌘9 real) still
+    # "eats" the difference, so "re-park them" would be advice that can't work and a
+    # warning nobody can clear. $short = "<unavoidable count> <real count>".
+    short="$(printf '%s' "$lay" | jq -r --argjson ls "$lay_labels" --argjson gs "$grp" "$JQ_NUMBERED"'
+        (numbered($gs)) as $rows
+        | ([ $rows[] | select(.title as $t | ($ls | any(. as $l | $t == $l or ($t | startswith($l + " ")))) | not) ] | length) as $reals
+        | ([ ($rows | length), 9 ] | min) - $reals
+        | "\(if . < 0 then 0 else . end) \($reals)"' 2>/dev/null)"
     n_ws="$(printf '%s' "$lay" | jq -r '.workspaces | length' 2>/dev/null)"
     n_meters="$(printf '%s' "$lay" | jq -r --argjson ls "$lay_labels" '
         [ .workspaces[] | select(.title as $t | $ls | any(. as $l | $t == $l or ($t | startswith($l + " ")))) ] | length' 2>/dev/null)"
@@ -478,6 +567,11 @@ if have cmux && have jq; then
       warn "couldn't read the workspace list$ctx — skipping layout check"
     elif [ "${n_meters:-0}" = 0 ]; then
       note "no meters$ctx — nothing to park"
+    elif [ -n "$eaten" ] && [ -n "$short" ] \
+      && [ "$(printf '%s' "$eaten" | tr ',' '\n' | grep -c '⌘')" -le "${short% *}" ] \
+      && { case "$eaten" in *⌘9*) [ "${short#* }" -lt 2 ] ;; *) true ;; esac; }; then
+      # Already the best layout there is (setup only anchors ⌘9 with 2+ reals).
+      note "meters$ctx are eating $eaten — unavoidable with ${short#* } real workspace(s) for 9 keys; nothing to re-park"
     elif [ -n "$eaten" ]; then
       warn "meters$ctx are eating $eaten — re-park them: $HERE/cmux-sentinel-setup.sh"
     else
@@ -526,7 +620,12 @@ if have cmux && have jq; then
   if [ -n "$snap" ] && printf '%s' "$snap" | jq -e . >/dev/null 2>&1; then
     # all meter labels for enabled providers
     labels=""
-    [ "$claude_on" = 1 ] && labels="$labels $lbl5 $lbl7"
+    if [ "$claude_on" = 1 ]; then
+      labels="$labels $lbl5 $lbl7"
+      [ "${CLAUDE_MODEL_METER:-0}" = 1 ] && labels="$labels $lblm7d"
+      # The spend row is per-window like any other sentinel, even while hidden.
+      [ -n "$(resolve_ref "$lblspend")" ] && labels="$labels $lblspend"
+    fi
     if [ "$codex_on" = 1 ]; then
       if [ "${cx_status:-unknown}" = "available" ]; then
         printf '%s\n' "$cx_live" | grep -qxF -- "$lblcx5" && labels="$labels $lblcx5"
@@ -565,8 +664,8 @@ else
   note "cmux or jq unavailable — skipping snapshot check"
 fi
 
-# Workspace-group names (opt-in). cmux passes custom sidebars NO group data, so a
-# group renders its anchor workspace's title (often a generic "Group N") instead of
+# Workspace-group names (opt-in). Before 0.64.23 cmux passed custom sidebars NO group
+# data, so a group rendered its anchor workspace's title (often a generic "Group N") instead of
 # the group name. cmux-group-sync.sh keeps anchor titles in sync when
 # GROUP_NAME_SYNC=1. This cross-checks groups-present × enabled × in-sync and only
 # nags when something is actually off. See
@@ -589,8 +688,15 @@ if have cmux && have jq; then
     done < <(cmux workspace-group list --window "$w" --json 2>/dev/null \
       | jq -r '.groups[]? | select(.name != null and .name != "") | "\(.name)\t\(.anchor_workspace_ref)"' 2>/dev/null)
   done < <(cmux list-windows --json 2>/dev/null | jq -r '.[].id // empty' 2>/dev/null)
+  native_groups=0
+  [ "$native_data" = 1 ] && sidebar_reads 'groups.filter' && native_groups=1
   if [ "$ngroups" = 0 ]; then
     note "no workspace groups — nothing to sync"
+  elif [ "$native_groups" = 1 ]; then
+    # cmux ≥ 0.64.23 binds `groups`, and the sidebar draws each anchor row with its
+    # group's name — a diverged anchor TITLE no longer shows, so it isn't drift.
+    ok "sidebar shows group names natively ($ngroups group(s), cmux v$cmux_ver)"
+    [ "$gsync" = 1 ] && note "GROUP_NAME_SYNC=1 is redundant on cmux ≥ $NATIVE_SIDEBAR_DATA (harmless — it only renames anchor titles)"
   elif [ "$gsync" = 1 ]; then
     if launchctl list 2>/dev/null | grep -q com.cmux-group-sync; then ok "group-name sync ON, launchd loaded ($ngroups group(s))"
     else warn "GROUP_NAME_SYNC=1 but launchd job not loaded — launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.cmux-group-sync.plist"; fi
