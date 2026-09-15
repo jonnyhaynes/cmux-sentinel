@@ -17,7 +17,14 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CANDIDATES=("$HERE" "$HERE/../libexec/cmux-sentinel" "$HOME/bin")
-REPO_URL="https://raw.githubusercontent.com/oliver-kriska/cmux-sentinel/main/install.sh"
+# This fork is the DISTRIBUTION, not a mirror of one, so `update` fetches the
+# installer from the same repo install.sh clones from. Both have to agree: if this
+# points upstream, the next `cmux-sentinel update` quietly replaces a fork install
+# with upstream's files — and the Command Code integration exists only here. That
+# failure is invisible until something stops working, which is why the repo is
+# named in one place per file. Keep in step with install.sh's REPO_URL, the
+# doctor's SELF_REPO, and the README/CHANGELOG one-liners.
+REPO_URL="https://raw.githubusercontent.com/jonnyhaynes/cmux-sentinel/main/install.sh"
 
 # A source TREE (root of a checkout) rather than a directory of scripts: `deploy`
 # needs install.sh plus sidebars/ and hooks/, which only exist together. Homebrew

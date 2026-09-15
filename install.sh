@@ -8,18 +8,19 @@
 set -euo pipefail
 
 # Opt-in features. Accept them as flags AND honour the env form (WITH_BRIDGE /
-# WITH_ZED / WITH_AMP / RELOAD_AGENTS) — a flag just exports the env so it survives
-# the curl-bootstrap re-exec below (which forwards env, not argv). Everything here
-# is OFF by default, so a plain install / the bare curl one-liner stays cmux-only,
-# Zed-free, and never interrupts a running launchd job.
+# WITH_ZED / WITH_AMP / WITH_COMMANDCODE / RELOAD_AGENTS) — a flag just exports the
+# env so it survives the curl-bootstrap re-exec below (which forwards env, not
+# argv). Everything here is OFF by default, so a plain install / the bare curl
+# one-liner stays cmux-only, Zed-free, and never interrupts a running launchd job.
 for arg in "$@"; do
   case "$arg" in
     --with-zed)    export WITH_ZED=1 ;;
     --with-bridge) export WITH_BRIDGE=1 ;;
     --with-amp)    export WITH_AMP=1 ;;
+    --with-commandcode) export WITH_COMMANDCODE=1 ;;
     --reload-agents) export RELOAD_AGENTS=1 ;;
     --no-setup)    export NO_SETUP=1 ;;
-    -h|--help)     echo "usage: install.sh [--with-bridge] [--with-zed] [--with-amp] [--reload-agents] [--no-setup]"; exit 0 ;;
+    -h|--help)     echo "usage: install.sh [--with-bridge] [--with-zed] [--with-amp] [--with-commandcode] [--reload-agents] [--no-setup]"; exit 0 ;;
     *) echo "install.sh: unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -181,6 +182,55 @@ register_hooks() {
   fi
 }
 
+# Command Code's hook store is a DIFFERENT FILE from Claude Code's. The `hooks`
+# MAP is Claude-shaped (that is why Command Code can read a Claude hooks block at
+# all), but the path differs (~/.commandcode/settings.json) and so do the
+# HookEntry fields — Command Code takes {type, command, timeout} and has no
+# `async`. So it needs its own writer rather than a second call to register_hooks,
+# which hardcodes the Claude path and the `async: true` field.
+#
+# Everything else follows register_hooks deliberately: idempotent by marker, and
+# render-then-compare so a re-run doesn't rewrite the file byte-identically, drop
+# a junk backup, and tell the user to restart for nothing.
+#
+# NO `matcher` is written on purpose. Command Code only fires a hook whose
+# definition matches, and Stop/SessionStart carry no tool at all — a matcher there
+# means the hook NEVER FIRES (its reference/hooks.md is explicit). Omitting it is
+# the "every tool" form for the tool events and the only correct form for the rest.
+register_commandcode_hooks() {
+  local cmd="$1" marker="$2"; shift 2
+  local settings="$HOME/.commandcode/settings.json" tmp events_json
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "  ⚠ jq not found — add the hooks block to $settings by hand"; return 0
+  fi
+  [ -f "$settings" ] || { mkdir -p "$(dirname "$settings")"; echo '{"hooks":{}}' >"$settings"; }
+  if ! jq -e . "$settings" >/dev/null 2>&1; then
+    echo "  ⚠ $settings isn't valid JSON — add the hooks block by hand"; return 0
+  fi
+  events_json="$(printf '%s\n' "$@" | jq -R . | jq -s .)"
+  tmp="$(mktemp)"
+  if jq --arg cmd "$cmd" --arg marker "$marker" --argjson events "$events_json" '
+      def ensure($ev):
+        (.hooks[$ev] // []) as $cur
+        | if ($cur | tostring | contains($marker)) then .
+          else .hooks[$ev] = ($cur + [{hooks: [{type: "command", command: $cmd, timeout: 10}]}]) end;
+      .hooks = (.hooks // {})
+      | reduce ($events[]) as $ev (.; ensure($ev))
+    ' "$settings" >"$tmp" && [ -s "$tmp" ]; then
+    if cmp -s "$tmp" "$settings"; then
+      rm -f "$tmp"
+      echo "  = $marker already wired into $settings"
+      return 0
+    fi
+    bak "$settings"
+    mv "$tmp" "$settings"
+    echo "  -> wired $marker into $settings (RESTART Command Code to load new hook events)"
+  else
+    rm -f "$tmp"
+    echo "  ⚠ couldn't update $settings automatically"
+  fi
+}
+
 echo "Installing opinionated cmux sidebar from $here"
 
 mkdir -p "$HOME/bin" "$cfg/sidebars" "$HOME/.claude/hooks" "$HOME/Library/LaunchAgents"
@@ -335,6 +385,41 @@ if [ "${WITH_AMP:-0}" = "1" ] || [ -f "$HOME/.config/amp/plugins/cmux-sentinel-a
   install -m 0644 "$here/hooks/amp-bridge.ts" "$HOME/.config/amp/plugins/cmux-sentinel-amp.ts"
   echo "  -> ~/.config/amp/plugins/cmux-sentinel-amp.ts"
   AMP_INSTALLED=1
+fi
+
+# 5d. Command Code integration. Mirrors the blocks above: also refreshes an
+#     already-installed adapter on a plain re-run, so an UPDATE can't leave a stale
+#     copy behind. Command Code's whole hook surface is four events (SessionStart /
+#     PreToolUse / PostToolUse / Stop) and NONE of them reports a permission or
+#     compact event, so the adapter contributes what the event stream cannot:
+#
+#       * a detached VIEWPORT watcher, which is where ❓ "blocked on you" comes
+#         from (`Blocked` → the shared bridge). It reads the live screen, never
+#         scrollback, because a resolved prompt stays in history forever and would
+#         strand the row at ❓.
+#       * a `cmd --session <id>` resume binding, so the terminal has a restart
+#         command cmux can offer after a relaunch.
+#
+#     PostToolUse is registered here for the first time and is load-bearing: it is
+#     what flips ❓ back to ⚡ once a prompt is answered. Register only SessionStart
+#     / PreToolUse / Stop (as this integration long did) and a watcher-set ❓ has
+#     nothing to clear it until the turn ends.
+#
+#     The adapter lives in ~/.claude/hooks/ alongside the shared bridge it drives —
+#     not because it is Claude-specific (it is an agent adapter, and ~/.claude/hooks
+#     is where the bridge it depends on already sits), but because that is the one
+#     directory the bridge is guaranteed to be deployed to.
+if [ "${WITH_COMMANDCODE:-0}" = "1" ] || [ -f "$HOME/.claude/hooks/cmux-bridge-commandcode.sh" ]; then
+  if [ ! -f "$HOME/.claude/hooks/cmux-bridge.sh" ]; then
+    echo "  ⚠ Command Code adapter needs the shared bridge — re-run with --with-bridge too"
+  else
+    bak "$HOME/.claude/hooks/cmux-bridge-commandcode.sh" "$here/hooks/cmux-bridge-commandcode.sh"
+    install -m 0755 "$here/hooks/cmux-bridge-commandcode.sh" "$HOME/.claude/hooks/cmux-bridge-commandcode.sh"
+    echo "  -> ~/.claude/hooks/cmux-bridge-commandcode.sh"
+    # shellcheck disable=SC2088
+    register_commandcode_hooks '~/.claude/hooks/cmux-bridge-commandcode.sh' 'cmux-bridge-commandcode' \
+      SessionStart PreToolUse PostToolUse Stop
+  fi
 fi
 
 # ── version stamp ─────────────────────────────────────────────────────────────

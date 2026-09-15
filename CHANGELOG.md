@@ -4,7 +4,7 @@ Re-run the installer to update; it re-deploys every file, re-runs setup so a rel
 meter gets its workspace, re-parks the sentinels out of ⌘1…⌘9, repaints and reloads the sidebar.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/oliver-kriska/cmux-sentinel/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jonnyhaynes/cmux-sentinel/main/install.sh | bash
 ```
 
 `~/bin/cmux-sentinel-doctor.sh` reports the version you actually have.
@@ -26,9 +26,39 @@ curl -fsSL https://raw.githubusercontent.com/oliver-kriska/cmux-sentinel/main/in
   called `workspaces.js`. The doctor also prints the cmux version, says when the deployed sidebar
   predates native agent/group data, and stops warning about a missing bridge or group sync when
   cmux already covers it.
+- **Command Code sessions now show `❓ waiting-on-you` (`--with-commandcode`).** Command Code fires
+  only four hook events and none of them reports a permission prompt — its shell-command permission,
+  plan/act mode prompts and plan review card are drawn as text on the visible pane and emit no event
+  at all. So the adapter runs a detached watcher that samples the **live viewport** and reports a new
+  `blocked` event to the shared bridge. The viewport is authoritative (it is the prompt you are
+  looking at, and it works before a turn exists, which the launch-time plan prompt needs) and
+  scrollback is never read — a resolved prompt stays in history forever and would pin the row at `❓`
+  for the rest of the session. The bridge keeps the state; the adapter only ever raises it.
+- **Command Code session restore.** The adapter publishes a `cmd --session <id>` binding from the
+  hook payload's `session_id`, so a restored terminal has a restart command cmux can offer. It uses
+  cmux's public binding path (stored for manual restore), not a forged `agent-hook` binding —
+  auto-restore stays a user approval in Settings, and `cmux surface resume show` confirms it.
+- **The doctor checks the Command Code adapter**: installed and matching this repo, whether the
+  shared bridge is new enough to accept its event (an older bridge ignores an unknown event *and*
+  exits 0, so this one mismatch fails in complete silence), whether all four hook events are
+  registered, and whether any pane watcher has been left behind by a dead session.
 
 ### Fixed
 
+- **`cmux-sentinel update` fetched upstream's installer instead of this fork's.** The dispatcher
+  still pointed at the upstream repo while `install.sh` cloned the fork, so updating a fork install
+  would have replaced it with upstream's files — dropping every integration that lives only here —
+  and the doctor's version probe compared against upstream's `VERSION`, so it could nag about a
+  release you cannot install while staying quiet about the one you can. The install URL is now the
+  fork everywhere (dispatcher, `install.sh`, the doctor's probe and its advice, and the CHANGELOG
+  one-liner; the README already pointed here). The Homebrew formula and `docs/release.md` still
+  reference the upstream tap — that needs a tap of its own, which is a separate decision.
+- **The shared bridge ignored `PostToolUse` — it had no handler for it at all.** Claude Code never
+  needed one (its `UserPromptSubmit` and the next `PreToolUse` both re-assert `⚡`), but Command Code
+  has no `UserPromptSubmit`, which makes `PostToolUse` the only signal that a permission prompt was
+  answered and the tool actually ran. Without it a watcher-raised `❓` had nothing to clear its
+  `.waiting.<pid>` flag until the next tool call or the end of the turn. It now maps to `⚡`, which
+  also means the event is correct for any future adapter that emits it.
 - **Amp meters went `⚠ no data` after Amp reworded `amp usage`** (`agent usage $5.27 of $20
   remaining (26%)`, where it used to print `74% other usage … remaining`). Both wordings parse; a
   percentage that isn't explicitly *remaining* is still refused rather than guessed.

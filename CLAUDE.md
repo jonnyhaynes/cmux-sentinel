@@ -297,10 +297,11 @@ bin/cmux-sidebar-live-smoke.sh  stage + validate + mount the repo sidebar agains
 bin/cmux-group-sync.sh      workspace-GROUP name → anchor-title sync (opt-in GROUP_NAME_SYNC). split-marker / multi-window / --list|--raw|--update.
 hooks/cmux-bridge.sh        Claude Code → cmux agent-state bridge (⚡ working / ⏳ compacting / ❓ waiting-on-you rows). AGENT-AGNOSTIC: CMUX_SENTINEL_SESSION_PID / _AGENT_LABEL / _LOG_SOURCE let any agent's adapter reuse it.
 hooks/amp-bridge.ts         Amp plugin (Bun/TS) → drives cmux-bridge.sh. Thin ADAPTER, no own state, so amp+claude co-tenants ref-count in one $WORKROOT. 2-of-3 states (no ⏳; ❓ opt-in).
+hooks/cmux-bridge-commandcode.sh  Command Code adapter → drives cmux-bridge.sh, PLUS the detached PANE WATCHER that supplies its ❓. Command Code's four events (SessionStart/PreToolUse/PostToolUse/Stop) include no permission prompt, so the watcher samples the LIVE VIEWPORT for its four blocking prompts and reports the `blocked` event (probed via `--capabilities`; an old bridge ignores it AND exits 0). VIEWPORT ONLY, never scrollback — a resolved prompt stays in history and would pin ❓ for the session. It only ever RAISES ❓; PostToolUse/Stop lower it. Also publishes a `cmd --session <id>` resume binding. Exits with its session pid.
 hooks/zed-bridge.sh         OPT-IN (ZED_SENTINEL=1) cmux-free Zed bridge: same ⚡/⏳/❓ markers to OSC-2 terminal metadata + JSON sink (stock Zed tab label stays process-derived).
 bin/cmux-open-in-zed.sh     OPT-IN cmux→Zed worktree handoff (`ze` alias / Ctrl-O via --shell-init). git-toplevel-aware; switch/--add/--new/--print.
 bin/zed-usage-tui.sh        OPT-IN usage meters rendered in a Zed terminal pane (reuses the pollers). No cmux writes.
-tests/                      bridge-state + poller-gate + codex-poller + amp-poller + install-hooks + sentinel-setup + sentinel-doctor + group-sync + zed-bridge + open-in-zed + usage-tui + amp-bridge + entrypoint. `make test`.
+tests/                      bridge-state + poller-gate + codex-poller + amp-poller + install-hooks + sentinel-setup + sentinel-doctor + group-sync + zed-bridge + open-in-zed + usage-tui + amp-bridge + commandcode-bridge + entrypoint. `make test`.
 scripts/make-formula.sh     GENERATES packaging/homebrew/cmux-sentinel.rb for a tag (url+sha256+version must agree); `--check` is the offline gate `make formula` runs.
 packaging/homebrew/         the tap's formula. Generated — regenerate after tagging, never hand-edit.
 VERSION + CHANGELOG.md      release stamp. install.sh copies VERSION (+ install date + short commit) to ~/.config/cmux-sentinel/VERSION; `cmux-sentinel version` and the doctor header read it back and compare against the remote VERSION (fail-silent; CMUX_SENTINEL_UPDATE_CHECK=0 disables).
@@ -309,8 +310,13 @@ examples/                   usage-sentinels.env + launchd plist templates (com.c
 
 - **Agent state rides STATIC title markers** the bridge keeps at the FRONT of the title — `⚡` =
   working, `⏳` = compacting, `❓` = waiting-on-you (the session asked a question via
-  `AskUserQuestion`/`ExitPlanMode`, or hit a MID-TURN permission `Notification` — it's alive but
-  parked, so it shows the orange needs-you treatment, NOT green "Working…"). The idle "waiting for
+  `AskUserQuestion`/`ExitPlanMode`, hit a MID-TURN permission `Notification`, or was SEEN sitting on a
+  blocking prompt on the live viewport by the Command Code pane watcher's `blocked` event — it's alive
+  but parked, so it shows the orange needs-you treatment, NOT green "Working…"). `blocked` is
+  deliberately NOT gated the way `Notification` is: that gate exists to discard the idle "waiting for
+  input" notice, which is a guess about the future, whereas the viewport is evidence of now — and the
+  plan-mode prompt appears at launch, before any pid file exists, which the gate would have thrown
+  away. The idle "waiting for
   input" Notification that fires ~60s after a turn ENDS is gated out (`_notify_waiting` checks for a
   live pid) so a finished workspace never flips to ❓. Precedence: compacting
   > waiting > working > needs-you(unread) > idle. The sidebar

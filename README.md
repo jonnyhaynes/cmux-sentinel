@@ -256,6 +256,41 @@ waiting-on-you is off unless you explicitly set `CMUX_SENTINEL_AMP_ASK=1` (which
 before configured tools). Also run `cmux hooks amp install` for cmux's separate native-sidebar
 integration; the two plugins coexist and serve different sidebars.
 
+### Command Code working-state rows (opt-in)
+
+`./install.sh --with-commandcode` installs `hooks/cmux-bridge-commandcode.sh` and auto-wires it into
+`~/.commandcode/settings.json` (idempotent, backed up), then **restart Command Code** so the events
+register. Like Claude Code it gets `⚡ working` and `idle`; unlike Claude Code it also gets
+`❓ waiting-on-you`, but from a different source.
+
+Command Code fires only four hook events — `SessionStart`, `PreToolUse`, `PostToolUse`, `Stop` — and
+**none of them reports a permission prompt**. Its blocking decisions (the shell-command permission,
+the plan/act mode prompts, the plan review card) are drawn as text on the visible pane and emit no
+event at all. So the adapter runs a small detached **pane watcher** that samples the live viewport
+and reports `❓` when one of those prompts is on screen. Two properties make that sound:
+
+- **The viewport is authoritative.** It is the prompt you are looking at, so nothing has to be
+  inferred or gated — and it works before a turn exists, which the plan-mode prompt (shown at launch)
+  requires.
+- **It never reads scrollback.** A resolved prompt stays in history forever, so a scrollback read
+  would re-report it and pin the row at `❓` for the rest of the session.
+
+`PostToolUse` is registered and load-bearing: it is what clears `❓` back to `⚡` once a prompt is
+answered. The adapter can only ever *raise* the state; lowering it is the event stream's job.
+
+The same session's `session_id` is published as a `cmd --session <id>` resume binding, so the
+terminal has a restart command cmux can offer after a relaunch. That uses cmux's public binding path,
+which stores it for manual restore; approve the command prefix in **Settings > Terminal > Resume
+Commands** if you want it to restore automatically.
+
+Tunables: `CMUX_SENTINEL_CC_POLL_INTERVAL` (default `2` seconds),
+`CMUX_SENTINEL_CC_MAX_READ_FAILURES` (default `5`), `CMUX_SENTINEL_CC_MAX_SCANS` (default: until the
+session exits), `CMUX_SENTINEL_CC_RESUME=0` to skip the resume binding, and
+`CMUX_SENTINEL_CC_DEBUG=1` to log watcher transitions to `$TMPDIR/cmux-sentinel-cc-watch/debug.log`.
+The watcher exits when its session process does. If `~/.commandcode/settings.json` was edited by
+hand, `cmux-sentinel doctor` reports a missing event, a bridge too old to accept the event, and any
+stale watcher left behind.
+
 ### Using Zed alongside cmux (opt-in, off by default)
 
 If you keep cmux for terminals/agents but reach for [Zed](https://zed.dev) as your editor + git UI,
@@ -601,12 +636,15 @@ bin/cmux-sentinel            one entry point: `cmux-sentinel setup|doctor|versio
 scripts/make-formula.sh      generate/verify the Homebrew formula for a tag (see docs/release.md)
 sidebars/workspaces.swift    the sidebar (the opinionated design + USAGE panels)
 hooks/cmux-bridge.sh         shared ref-counted agent-state bridge
+hooks/cmux-bridge-commandcode.sh  Command Code adapter → shared bridge (+ the pane watcher that supplies ❓)
 hooks/amp-bridge.ts          Amp plugin adapter → shared bridge
+hooks/cmux-title.sh          "<brand> repo · branch" workspace titles (opt-in alongside the bridge)
 tests/bridge-state.sh        offline bridge state-machine test (stubs cmux; `make test`)
 tests/poller-gate.sh         offline Claude poller gating + clamping + bare-label + multi-window
 tests/codex-poller.sh        offline Codex RPC/auth gating + duration routing + multi-window
 tests/amp-poller.sh          offline Amp prose parsing + remaining→used inversion + orb opt-in
 tests/amp-bridge.sh          shared bridge behavior + Amp adapter contracts
+tests/commandcode-bridge.sh  Command Code adapter + the pane watcher (signals, gating, lifecycle)
 tests/install-hooks.sh       offline install.sh hook-registration test
 tests/sentinel-setup.sh      offline cmux-sentinel-setup.sh test
 tests/sentinel-doctor.sh     offline multi-window health-check + provider diagnostics
